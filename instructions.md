@@ -180,8 +180,7 @@ Each student submits:
 ## Timeline
 
 - Preferences submitted by Friday March $6{ }^{\text {th }}$, 2026
-- Form: https://forms.gle/ngLfgoLq7QNB7bHg6
-- Groups assigned shortly thereafter
+-Groups assigned shortly thereafter
 - Presentations start Tuesday April 21, 2026
 - Tutorials uploaded and submitted by Wednesday April $29{ }^{\text {th }}$, by 11:59 PM
 
