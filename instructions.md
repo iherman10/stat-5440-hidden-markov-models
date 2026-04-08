@@ -27,14 +27,12 @@ The lecture must include:
 - Why can't standard regression handle it?
 - Where does it show up in practice?
 
-
 ## B. Model Specification
 
 - Likelihood
 - Priors
 - Hierarchical structure (if relevant)
 - Key modeling assumptions
-
 
 ## C. Applied Example
 
@@ -44,7 +42,6 @@ The lecture must include:
 - Diagnostics
 - Posterior summaries
 - Posterior predictive checks
-
 
 ## D. Interpretation
 
@@ -128,7 +125,6 @@ There are:
 - 90 min per class
 - Up to 3 class sessions available
 
-
 ## Plan
 
 - 6 groups of 4-5 students
@@ -168,7 +164,6 @@ Each student submits:
 - Ranked top 6 topics
 - Optional: preferred collaborator (max 1 request)
 
-
 ## Form Groups \& Assign Topics
 
 1. I will try to pair people who requested each other first
@@ -180,10 +175,9 @@ Each student submits:
 ## Timeline
 
 - Preferences submitted by Friday March $6{ }^{\text {th }}$, 2026
--Groups assigned shortly thereafter
+  -Groups assigned shortly thereafter
 - Presentations start Tuesday April 21, 2026
 - Tutorials uploaded and submitted by Wednesday April $29{ }^{\text {th }}$, by 11:59 PM
-
 
 ## Requirements \& Constraints
 
@@ -199,13 +193,11 @@ In order to have a great project you should
 - How would results change under a different assumption?
 - What is one modeling decision that materially affects inference?
 
-
 ## And Cannot:
 
 - Just restate textbook example
 - Use pre-built black-box without explanation
 - Skip model assumptions
-
 
 ## What this project is testing
 
@@ -213,4 +205,3 @@ In order to have a great project you should
 - Can you explain modeling assumptions?
 - Can you produce reproducible research?
 - Do you understand posterior interpretation?
-
