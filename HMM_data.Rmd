@@ -1,0 +1,104 @@
+---
+title: "Bayesian_Modeling_Final"
+output: pdf_document
+date: "2026-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Loading
+Trying to load some data, first start by installing packages 
+```{r}
+install.packages("baseballr") #open-source R package 
+install.packages("tidyverse") 
+library(baseballr)
+library(tidyverse)
+```
+
+```{r}
+install.packages("remotes") #install package from non-standard locations
+remotes::install_github("BillPetti/baseballr") #install off github 
+```
+Run a quick test, get Statcast pitch-level data 
+```{r}
+test <- statcast_search(start_date = "2024-04-01", end_date = "2024-04-07")
+nrow(test)
+```
+```{r}
+pitcher_ids <- c(
+  "Gerrit Cole"     = 543037,
+  "Kevin Gausman"   = 592332,
+  "Logan Webb"      = 657277,
+  "Zack Wheeler"    = 554430,
+  "Sandy Alcantara" = 645261
+)
+```
+```{r}
+# Generate week-by-week date ranges for 2024 season
+start_dates <- seq(as.Date("2024-04-01"), as.Date("2024-09-25"), by = "7 days")
+end_dates   <- pmin(start_dates + 6, as.Date("2024-09-29"))
+
+date_ranges <- tibble(start = start_dates, end = end_dates)
+
+# Pull each week, filter to your pitchers, keep only FF (four seam fastball)
+fetch_week <- function(start_dt, end_dt) {
+  message("Pulling: ", start_dt, " to ", end_dt)
+  
+  df <- tryCatch({
+    statcast_search(
+      start_date  = as.character(start_dt),
+      end_date    = as.character(end_dt),
+      player_type = "pitcher"
+    )
+  }, error = function(e) {
+    message("  Error: ", e$message)
+    return(NULL)
+  })
+  
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  
+  # Filter to your pitchers and four-seam fastballs only
+  df <- df %>%
+    filter(
+      pitcher %in% pitcher_ids,
+      pitch_type == "FF"
+    )
+  
+  Sys.sleep(3)
+  return(df)
+}
+
+# Pull all weeks — this will take several minutes
+raw_data <- map2_dfr(date_ranges$start, date_ranges$end, fetch_week)
+```
+```{r}
+# sanity check 
+raw_data %>%
+  group_by(player_name) %>%
+  summarise(
+    n_pitches = n(),
+    n_games   = n_distinct(game_pk),
+    date_min  = min(game_date),
+    date_max  = max(game_date)
+  )
+```
+```{r}
+# get raw data 
+raw_data
+```
+```{r}
+names(raw_data)
+```
+```{r}
+raw_data['release_speed']
+```
+```{r}
+raw_data['release_spin_rate'] #revolutions per minute 
+```
+```{r}
+df <- raw_data[, c("player_name", "game_date", "release_speed", "pitch_number", "at_bat_number")]
+df
+```
+
