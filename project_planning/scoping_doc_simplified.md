@@ -43,19 +43,19 @@ $$z_{g,t} \in \{1, 2, 3\}$$
 
 Within each state, observed velocity is modeled as a univariate Gaussian:
 
-$$y_{g,t} \mid z_{g,t} = k \sim \text{Normal}(\mu_k, \sigma_k^2)$$
+$$y_{g,t} \mid z_{g,t} = k \sim \text{Normal}(\mu_k, \sigma^2)$$
 
-where $\mu_k$ is the state-specific mean velocity and $\sigma_k^2$ is the state-specific variance.
+where $\mu_k$ is the state-specific mean velocity and $\sigma^2$ is a **shared, fixed variance** — the same across all states. We fix $\sigma$ to the empirical standard deviation of the pitcher's four-seam velocities across the full season. This simplification mirrors the lecture code (which assumes known $\sigma = 1$) and means we only need to estimate the means $\mu_k$, not the variances.
 
 ### Transition Model
 
 The pitcher's hidden state at each pitch depends on the state at the previous pitch. The relationship is governed by a **transition matrix** $A$, which is a $3 \times 3$ table of probabilities:
 
-| | Next: Cold | Next: Baseline | Next: Hot |
-|---|---|---|---|
-| **Current: Cold** | high | low | low |
-| **Current: Baseline** | low | high | low |
-| **Current: Hot** | low | low | high |
+|                       | Next: Cold | Next: Baseline | Next: Hot |
+| --------------------- | ---------- | -------------- | --------- |
+| **Current: Cold**     | high       | low            | low       |
+| **Current: Baseline** | low        | high           | low       |
+| **Current: Hot**      | low        | low            | high      |
 
 Each row sums to 1. To determine the next state, we look up the current state's row and draw from those probabilities. For example, if the pitcher is currently in the Baseline state, we look at row 2 and draw the next state from those three probabilities. In formal notation:
 
@@ -83,17 +83,7 @@ where $\bar{y}$ is the pitcher's overall average four-seam velocity (computed fr
 
 ### Emission Variances
 
-We need a prior on $\sigma_k$ (the state-specific standard deviation). Two common options:
-
-1. **Exponential prior (simplest):**
-   $$\sigma_k \sim \text{Exponential}(1)$$
-   Simple, one parameter, weakly informative. Puts most mass on small-to-moderate standard deviations. This is the recommended default for simplicity.
-
-2. **Half-Cauchy prior:**
-   $$\sigma_k \sim \text{Half-Cauchy}(0, 2.5)$$
-   Slightly heavier tails than the exponential, which makes it more forgiving if the data has more spread than expected. A standard choice in Bayesian modeling but marginally more complex.
-
-**Recommendation:** Start with the Exponential(1) prior. It's the simplest and works well for this kind of problem.
+The variance $\sigma^2$ is treated as **fixed and known** — set to the empirical variance of all four-seam fastball velocities for the pitcher. No prior is needed and no sampling is required. This is the same assumption as the lecture code, which fixes $\sigma = 1$.
 
 ### Transition Matrix Rows
 
@@ -101,11 +91,11 @@ Each row of the transition matrix gets a Dirichlet prior. The Dirichlet paramete
 
 We want each state to favor staying in itself (persistence), so we put a large value on the diagonal entry and small values elsewhere:
 
-| Row (current state) | Dirichlet prior | Interpretation |
-|---|---|---|
-| **Cold** | Dirichlet(8, 1, 1) | Expect ~80% chance of staying cold |
-| **Baseline** | Dirichlet(1, 8, 1) | Expect ~80% chance of staying baseline |
-| **Hot** | Dirichlet(1, 1, 8) | Expect ~80% chance of staying hot |
+| Row (current state) | Dirichlet prior    | Interpretation                         |
+| ------------------- | ------------------ | -------------------------------------- |
+| **Cold**            | Dirichlet(8, 1, 1) | Expect ~80% chance of staying cold     |
+| **Baseline**        | Dirichlet(1, 8, 1) | Expect ~80% chance of staying baseline |
+| **Hot**             | Dirichlet(1, 1, 8) | Expect ~80% chance of staying hot      |
 
 The "8" on the diagonal encodes our belief that states persist. The "1"s on the off-diagonal say transitions are possible but less likely. These are soft priors — the data can easily override them. The exact values (e.g., 8 vs. 6 vs. 10) can be tuned.
 
@@ -113,11 +103,11 @@ The "8" on the diagonal encodes our belief that states persist. The "1"s on the 
 
 $$\pi \sim \text{Dirichlet}(2, 6, 2)$$
 
-| State | Dirichlet parameter | Prior expected probability |
-|---|---|---|
-| Cold | 2 | ~20% |
-| Baseline | 6 | ~60% |
-| Hot | 2 | ~20% |
+| State    | Dirichlet parameter | Prior expected probability |
+| -------- | ------------------- | -------------------------- |
+| Cold     | 2                   | ~20%                       |
+| Baseline | 6                   | ~60%                       |
+| Hot      | 2                   | ~20%                       |
 
 This says we expect most games to begin near the baseline state, with some probability of starting hot or cold. This is a soft prior — the data can easily move it.
 
@@ -132,6 +122,7 @@ This says we expect most games to begin near the baseline state, with some proba
 
 These are things we could add later if time permits or the base model works well:
 
+- Allow per-state variances $\sigma_k^2$ (unknown, estimated via Gibbs) instead of a shared fixed $\sigma^2$
 - Add a second emission metric (e.g., spin rate) and move to multivariate Gaussian emissions
 - Add covariates to the transition matrix (e.g., pitch count, inning) to model fatigue effects
 - Expand to multiple pitchers with hierarchical priors on emission parameters
