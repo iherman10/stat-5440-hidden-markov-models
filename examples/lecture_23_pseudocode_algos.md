@@ -12,11 +12,11 @@ We observe a sequence of data points $Y_1, Y_2, \dots, Y_n$ (here $n = 100$). Ea
 
 **Parameters:**
 
-| Symbol                 | Meaning                          | True value in `lecture_23.R`                           |
-| ---------------------- | -------------------------------- | ------------------------------------------------------ |
-| $\mu = (\mu_1, \mu_2)$ | Emission means (one per state)   | $(3, 5)$                                               |
-| $\nu$                  | Transition matrix ($m \times m$) | $\begin{pmatrix} 0.9 & 0.1 \\ 0.1 & 0.9 \end{pmatrix}$ |
-| $\pi = (\pi_1, \pi_2)$ | Initial state probabilities      | $(0.5, 0.5)$                                           |
+| Symbol                 | Meaning                          | True value in `lecture_23.R` |
+| ---------------------- | -------------------------------- | ---------------------------- |
+| $\mu = (\mu_1, \mu_2)$ | Emission means (one per state)   | $(3, 5)$                     |
+| $\nu$                  | Transition matrix ($m \times m$) | see table below              |
+| $\pi = (\pi_1, \pi_2)$ | Initial state probabilities      | $(0.5, 0.5)$                 |
 
 **Emission model:** If the hidden state at time $t$ is $X_t = j$, then the observation is drawn from a Normal distribution:
 
@@ -474,7 +474,7 @@ This gives a more nuanced picture than Viterbi's single best guess -- instead of
 
 ### Inputs
 
-- Post-processed state samples: $X^{(1)}, X^{(2)}, \dots, X^{(S)}$ (each is a length-$n$ sequence)
+- Post-processed state samples: $X^{(1)}, X^{(2)}, \dots, X^{(S)}$ (each is a length-n sequence)
 
 ### Output
 
