@@ -35,6 +35,95 @@ output:
 
 ## Load Data
 
+```{r, message=FALSE, warning=FALSE}
+library(baseballr)
+library(tidyverse)
+
+pitcher_ids <- c(
+    "Gerrit Cole" = 543037,
+    "Kevin Gausman" = 592332,
+    "Logan Webb" = 657277,
+    "Zack Wheeler" = 554430,
+    "Sandy Alcantara" = 645261
+)
+
+# MLB season boundaries (2020 was COVID-shortened)
+seasons <- list(
+    list(start = "2019-03-28", end = "2019-09-29"),
+    list(start = "2020-07-23", end = "2020-09-27"),
+    list(start = "2021-04-01", end = "2021-10-03"),
+    list(start = "2022-04-07", end = "2022-10-05"),
+    list(start = "2023-03-30", end = "2023-10-01"),
+    list(start = "2024-04-01", end = "2024-09-29")
+)
+
+# Generate week-by-week date ranges across all seasons
+date_ranges <- map_dfr(seasons, function(s) {
+    start_dates <- seq(as.Date(s$start), as.Date(s$end) - 6, by = "7 days")
+    end_dates <- pmin(start_dates + 6, as.Date(s$end))
+    tibble(start = start_dates, end = end_dates)
+})
+
+fetch_week <- function(start_dt, end_dt) {
+    message("Pulling: ", start_dt, " to ", end_dt)
+
+    df <- tryCatch(
+        {
+            statcast_search(
+                start_date  = as.character(start_dt),
+                end_date    = as.character(end_dt),
+                player_type = "pitcher"
+            )
+        },
+        error = function(e) {
+            message("  Error: ", e$message)
+            return(NULL)
+        }
+    )
+
+    if (is.null(df) || nrow(df) == 0) {
+        return(NULL)
+    }
+
+    df <- df %>%
+        filter(
+            pitcher %in% pitcher_ids,
+            pitch_type == "FF"
+        )
+
+    Sys.sleep(3)
+    return(df)
+}
+
+if (file.exists("data/hmm_data.csv")) {
+    df <- read_csv("data/hmm_data.csv")
+} else {
+    # Pull all weeks across all seasons — this will take ~30+ minutes
+    raw_data <- map2_dfr(date_ranges$start, date_ranges$end, fetch_week)
+
+    # Keep only pitcher-seasons with enough samples (min 200 FF pitches ~ 6-7 starts)
+    min_pitches <- 200
+
+    qualifying_seasons <- raw_data %>%
+        mutate(season = lubridate::year(as.Date(game_date))) %>%
+        group_by(player_name, season) %>%
+        summarise(n_pitches = n(), .groups = "drop") %>%
+        filter(n_pitches >= min_pitches) %>%
+        # Only keep seasons where ALL pitchers qualify
+        group_by(season) %>%
+        filter(n() == length(pitcher_ids)) %>%
+        ungroup() %>%
+        select(player_name, season)
+
+    df <- raw_data %>%
+        mutate(season = lubridate::year(as.Date(game_date))) %>%
+        semi_join(qualifying_seasons, by = c("player_name", "season")) %>%
+        select(player_name, game_date, season, release_speed, pitch_number, at_bat_number)
+
+    write_csv(df, "data/hmm_data.csv")
+}
+```
+
 ## Fit Model
 
 ## MCMC Diagnostics
