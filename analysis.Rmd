@@ -1,0 +1,58 @@
+---
+title: "Bayesian Hidden Markov Models to Infer Latent Pitcher States"
+author: "Garrett Lee, Trey Elder, Isaac Herman, Injun Lyo"
+date: ""
+output:
+  pdf_document:
+    extra_dependencies: ["float"]
+---
+
+# 1. Motivation
+
+## What Problem Does This Method Solve?
+
+## Why Can't Standard Regression Handle It?
+
+## Where Does It Show Up in Practice?
+
+---
+
+# 2. Model Specification
+
+## Likelihood
+
+## Priors
+
+## Hierarchical Structure
+
+## Key Modeling Assumptions
+
+---
+
+# 3. Applied Example
+
+## Data Description and Context
+
+## Load Data
+
+## Fit Model
+
+## MCMC Diagnostics
+
+## Posterior Summaries
+
+## Posterior Predictive Checks
+
+## Visualizations
+
+---
+
+# 4. Interpretation
+
+## What Did We Learn?
+
+## Limitations
+
+## When Should We Use This Model?
+
+## Sensitivity to Modeling Assumptions
