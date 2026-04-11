@@ -35,6 +35,8 @@ output:
 
 ## Load Data
 
+We pull pitch-level Statcast data across the 2019–2024 MLB seasons using `fetch_statcast()`, which wraps a week-by-week API loop via `baseballr` and caches results to a local CSV. Querying by individual player ID rather than pulling all pitchers keeps each API call small. Pitch-type filtering is deferred to the Clean Data step so the raw cache stays flexible. Currently configured for Gerrit Cole.
+
 ```{r, message=FALSE, warning=FALSE}
 library(baseballr)
 library(tidyverse)
@@ -64,14 +66,15 @@ date_ranges <- map_dfr(seasons, function(s) {
     tibble(start = start_dates, end = end_dates)
 })
 
-fetch_week <- function(start_dt, end_dt, i, n) {
+fetch_week <- function(start_dt, end_dt, i, n, player_id) {
     message(sprintf("[%d/%d] Pulling: %s to %s", i, n, start_dt, end_dt))
 
-    df <- tryCatch(
+    result <- tryCatch(
         {
             statcast_search(
                 start_date  = as.character(start_dt),
                 end_date    = as.character(end_dt),
+                playerid    = player_id,
                 player_type = "pitcher"
             )
         },
@@ -81,63 +84,75 @@ fetch_week <- function(start_dt, end_dt, i, n) {
         }
     )
 
-    if (is.null(df) || nrow(df) == 0) {
+    if (is.null(result) || nrow(result) == 0) {
         return(NULL)
     }
-
-    df <- df %>%
-        filter(
-            pitcher %in% pitcher_ids,
-            pitch_type == "FF"
-        )
-
     Sys.sleep(3)
-    return(df)
+    return(result)
 }
 
-if (file.exists("data/hmm_data.csv")) {
-    df <- read_csv("data/hmm_data.csv")
-} else {
-    # Pull all weeks across all seasons — this will take ~30+ minutes
+fetch_statcast <- function(player_name, player_id, cache_file) {
+    if (file.exists(cache_file)) {
+        message("Loading cached data from ", cache_file)
+        return(read_csv(cache_file, show_col_types = FALSE))
+    }
+
+    message("Scraping Statcast data for ", player_name, " — this will take ~10 minutes")
     n_weeks <- nrow(date_ranges)
     raw_data <- pmap_dfr(
-        list(date_ranges$start, date_ranges$end, seq_len(n_weeks), n_weeks),
+        list(date_ranges$start, date_ranges$end, seq_len(n_weeks), n_weeks, player_id),
         fetch_week
     )
 
-    # Keep only pitcher-seasons with enough samples (min 200 FF pitches ~ 6-7 starts)
-    min_pitches <- 200
-
-    qualifying_seasons <- raw_data %>%
-        mutate(season = lubridate::year(as.Date(game_date))) %>%
-        group_by(player_name, season) %>%
-        summarise(n_pitches = n(), .groups = "drop") %>%
-        filter(n_pitches >= min_pitches) %>%
-        # Only keep seasons where ALL pitchers qualify
-        group_by(season) %>%
-        filter(n() == length(pitcher_ids)) %>%
-        ungroup() %>%
-        select(player_name, season)
-
     df <- raw_data %>%
         mutate(season = lubridate::year(as.Date(game_date))) %>%
-        semi_join(qualifying_seasons, by = c("player_name", "season")) %>%
         select(
             player_name, game_date, season,
-            # pitch sequencing
+            pitch_type,
             inning, at_bat_number, pitch_number,
-            # velocity and spin
             release_speed, release_spin_rate,
-            # movement
             pfx_x, pfx_z,
-            # release mechanics
             release_extension,
-            # count context
             balls, strikes
         )
 
-    write_csv(df, "data/hmm_data.csv")
+    write_csv(df, cache_file)
+    df
 }
+
+gerrit_cole <- fetch_statcast("Gerrit Cole", pitcher_ids[["Gerrit Cole"]], "data/gerrit_cole.csv")
+```
+
+## Clean Data
+
+`get_player_data()` filters a raw Statcast dataframe to a single pitcher, optionally subsets by pitch type and season, and restructures the result into the format expected by the HMM. Within each season, games are numbered sequentially by date. Within each game, pitches are sorted by `inning → at_bat_number → pitch_number` (the within-at-bat index) to recover true chronological order, then renumbered 1, 2, 3, ... as a single game-level sequence. The ordering columns are dropped; only the derived `pitch_number` is retained alongside the selected metrics.
+
+```{r}
+metrics_all <- c("release_speed", "release_spin_rate", "pfx_x", "pfx_z", "release_extension")
+
+get_player_data <- function(data, name, pitch_type = NULL, season_filter = NULL, metrics = NULL) {
+    if (is.null(metrics)) metrics <- metrics_all
+
+    data %>%
+        filter(player_name == name) %>%
+        {
+            if (!is.null(pitch_type)) filter(., pitch_type %in% !!pitch_type) else .
+        } %>%
+        {
+            if (!is.null(season_filter)) filter(., season %in% season_filter) else .
+        } %>%
+        group_by(season, game_date) %>%
+        arrange(inning, at_bat_number, pitch_number, .by_group = TRUE) %>%
+        mutate(pitch_number = row_number()) %>%
+        ungroup() %>%
+        group_by(season) %>%
+        mutate(game_number = dense_rank(game_date)) %>%
+        ungroup() %>%
+        select(season, player = player_name, game_number, pitch_number, all_of(metrics))
+}
+
+filtered_gerrit_cole <- get_player_data(gerrit_cole, "Cole, Gerrit", pitch_type = "FF", season_filter = max(df$season), metrics = "release_speed")
+head(filtered_gerrit_cole)
 ```
 
 ## Fit Model
