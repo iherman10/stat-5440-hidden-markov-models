@@ -20,7 +20,7 @@ knitr::opts_chunk$set(
 
 Data is read in from a pre-simulated 2-state HMM with Normal emissions and true parameters $\mu = (3, 5)$, $\nu_{11} = \nu_{22} = 0.9$, and $\pi = (0.5, 0.5)$. Global constants $n = 100$ observations and $m = 2$ states are defined here. The observed data $Y$ and true hidden states $X$ are plotted side by side.
 
-```{r, fig.height=7, echo=TRUE}
+```{r, fig.height=7}
 #################################################
 #### READING IN DATA GENERATED FROM HMM WITH ####
 #### NORMAL NOISE: mu=(3,5),nu[1,1] = 0.9    ####
@@ -46,7 +46,7 @@ plot(1:n, X.norm, pch = 19, cex = 1.5)
 
 The Viterbi algorithm finds the single most probable sequence of hidden states $\hat{X}_{1:n}$ given the observed data and true parameters. It runs in two passes: a forward pass fills in $\delta_{t,i}$, the probability of the most likely path ending in state $i$ at time $t$; a backward trace then recovers the optimal state sequence. The inferred states are compared against the true states, with mismatches highlighted in red.
 
-```{r, fig.height=9, echo=TRUE}
+```{r, fig.height=9}
 #################################################
 ####### VITERBI ALGORITHM FOR NORMAL DATA #######
 #################################################
@@ -109,7 +109,7 @@ Instead of finding a single best state sequence, the Gibbs sampler draws from th
 
 Two independent chains are run from different starting values to assess convergence.
 
-```{r, echo=TRUE}
+```{r}
 #################################################
 #### FULL POSTERIOR SAMPLING FOR NORMAL DATA ####
 #################################################
@@ -316,7 +316,7 @@ mu.samp2 <- mu.samp
 
 The HMM likelihood is symmetric in the state labels: swapping all 1s and 2s produces an identical likelihood. As a result, the sampler can arbitrarily re-assign which numeric label corresponds to which physical state across iterations. This is called *label switching*. It is corrected post-hoc by enforcing the identifiability constraint $\mu_1 < \mu_2$: any iteration where $\mu_1 > \mu_2$ has its labels swapped for $\mu$, $\pi$, $\nu$, and $X$.
 
-```{r, echo=TRUE}
+```{r}
 ### 1. DEFINE A REUSABLE FUNCTION TO FIX LABEL SWITCHING ###
 fix_label_switching <- function(mu_mat, nu_mat, pi_mat, X_mat) {
     n_iter <- nrow(mu_mat)
@@ -368,7 +368,7 @@ nu.fixed2 <- fixed_chain2$nu
 
 Trace plots for both chains are overlaid after fixing label switching. If the chains have converged to the same stationary distribution, the two traces should occupy the same range and mix across each other throughout the run.
 
-```{r, fig.height=9, echo=TRUE}
+```{r, fig.height=9}
 ### 3. PLOT THE OVERLAPPING CHAINS ###
 par(mfrow = c(3, 1))
 
@@ -404,7 +404,7 @@ lines(1:numsamp, nu.fixed2[, 2], col = 3)
 
 The first several hundred iterations may still reflect the starting values rather than the stationary distribution. Zooming in on the first 1,000 iterations shows how quickly each chain converges from its starting point. Samples from this burn-in window will be discarded before inference.
 
-```{r, fig.height=9, echo=TRUE}
+```{r, fig.height=9}
 # Checking convergence during the burn-in period using FIXED chains
 par(mfrow = c(3, 1))
 
@@ -440,7 +440,7 @@ lines(1:1000, nu.fixed2[1:1000, 2], col = 3)
 
 The first 1,000 iterations are discarded as burn-in. The two chains are then combined into a single sample pool. ACF plots are used to check autocorrelation — high autocorrelation means successive draws are nearly redundant. To reduce it, the combined chain is **thinned** by keeping only every 5th sample. ACF plots are checked again after thinning to confirm rapid decay.
 
-```{r, fig.height=10, echo=TRUE}
+```{r, fig.height=10}
 postburn <- 1001:numsamp
 X.samp <- rbind(fixed_chain1$X[postburn, ], fixed_chain2$X[postburn, ])
 mu.samp <- rbind(fixed_chain1$mu[postburn, ], fixed_chain2$mu[postburn, ])
@@ -461,7 +461,7 @@ acf(pi.samp[, 2])
 
 The ACF plots above show autocorrelation before thinning. If autocorrelation is high, every 5th sample is kept to reduce it. The thinned samples are stored as the final posterior draws used for inference.
 
-```{r, fig.height=10, echo=TRUE}
+```{r, fig.height=10}
 ### thinning
 temp <- 5 * (c(1:(length(mu.samp[, 1]) / 5)))
 
@@ -491,7 +491,7 @@ pi.final <- pi.samp.thin
 
 Trace plots for the thinned, combined posterior samples. These should show stable mixing with no trend or drift, confirming the chain has reached stationarity.
 
-```{r, fig.height=9, echo=TRUE}
+```{r, fig.height=9}
 # Checking trace plots AFTER fixing label switching (with consistent Y-axes)
 par(mfrow = c(3, 1))
 
@@ -527,7 +527,7 @@ plot(nu.final[, 2],
 
 For each time point $t$, the posterior probability that the hidden state is 2 is computed as the fraction of posterior samples with $X_t = 2$. This gives a soft, probabilistic estimate of the state at each time point — unlike the Viterbi estimate, which gives a single hard assignment. The four panels compare the observed data, true hidden states, Viterbi solution, and the full posterior state probabilities.
 
-```{r, fig.height=10, echo=TRUE}
+```{r, fig.height=10}
 ### calculating posterior probabilities of hidden states
 X.postprob <- rep(NA, n)
 for (j in 1:n) {
