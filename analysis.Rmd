@@ -64,8 +64,8 @@ date_ranges <- map_dfr(seasons, function(s) {
     tibble(start = start_dates, end = end_dates)
 })
 
-fetch_week <- function(start_dt, end_dt) {
-    message("Pulling: ", start_dt, " to ", end_dt)
+fetch_week <- function(start_dt, end_dt, i, n) {
+    message(sprintf("[%d/%d] Pulling: %s to %s", i, n, start_dt, end_dt))
 
     df <- tryCatch(
         {
@@ -76,7 +76,7 @@ fetch_week <- function(start_dt, end_dt) {
             )
         },
         error = function(e) {
-            message("  Error: ", e$message)
+            message(sprintf("[%d/%d] Error: %s", i, n, e$message))
             return(NULL)
         }
     )
@@ -99,7 +99,11 @@ if (file.exists("data/hmm_data.csv")) {
     df <- read_csv("data/hmm_data.csv")
 } else {
     # Pull all weeks across all seasons — this will take ~30+ minutes
-    raw_data <- map2_dfr(date_ranges$start, date_ranges$end, fetch_week)
+    n_weeks <- nrow(date_ranges)
+    raw_data <- pmap_dfr(
+        list(date_ranges$start, date_ranges$end, seq_len(n_weeks), n_weeks),
+        fetch_week
+    )
 
     # Keep only pitcher-seasons with enough samples (min 200 FF pitches ~ 6-7 starts)
     min_pitches <- 200
@@ -118,7 +122,19 @@ if (file.exists("data/hmm_data.csv")) {
     df <- raw_data %>%
         mutate(season = lubridate::year(as.Date(game_date))) %>%
         semi_join(qualifying_seasons, by = c("player_name", "season")) %>%
-        select(player_name, game_date, season, release_speed, pitch_number, at_bat_number)
+        select(
+            player_name, game_date, season,
+            # pitch sequencing
+            inning, at_bat_number, pitch_number,
+            # velocity and spin
+            release_speed, release_spin_rate,
+            # movement
+            pfx_x, pfx_z,
+            # release mechanics
+            release_extension,
+            # count context
+            balls, strikes
+        )
 
     write_csv(df, "data/hmm_data.csv")
 }
