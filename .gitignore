@@ -1,2 +1,3 @@
 examples/lecture23_cache/
 examples/lecture23_files/
+*.rds
