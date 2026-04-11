@@ -151,13 +151,264 @@ get_player_data <- function(data, name, pitch_type = NULL, season_filter = NULL,
         select(season, player = player_name, game_number, pitch_number, all_of(metrics))
 }
 
-filtered_gerrit_cole <- get_player_data(gerrit_cole, "Cole, Gerrit", pitch_type = "FF", season_filter = max(df$season), metrics = "release_speed")
+filtered_gerrit_cole <- get_player_data(gerrit_cole, "Cole, Gerrit", pitch_type = "FF", season_filter = max(gerrit_cole$season), metrics = "release_speed")
 head(filtered_gerrit_cole)
 ```
 
 ## Fit Model
 
+```{r}
+# Use pre-2024 seasons to get empirical prior means for each state
+historic_cole <- get_player_data(gerrit_cole, "Cole, Gerrit",
+    pitch_type = "FF",
+    season_filter = setdiff(unique(gerrit_cole$season), max(gerrit_cole$season)),
+    metrics = "release_speed"
+)
+
+# Split at the 75th percentile: baseline (lower 75%) vs. hot (upper 25%)
+q75 <- quantile(historic_cole$release_speed, 0.75)
+baseline_pitches <- historic_cole$release_speed[historic_cole$release_speed <= q75]
+hot_pitches <- historic_cole$release_speed[historic_cole$release_speed > q75]
+
+prior_mu_mean <- c(mean(baseline_pitches), mean(hot_pitches))
+cat(
+    "Historic prior means — Baseline:", round(prior_mu_mean[1], 2),
+    "  Hot:", round(prior_mu_mean[2], 2), "\n"
+)
+cat(
+    "Group sizes — Baseline:", length(baseline_pitches),
+    "  Hot:", length(hot_pitches), "\n"
+)
+```
+
+```{r}
+# Reshape cleaned data into list-of-games format expected by the HMM
+Y <- split(filtered_gerrit_cole$release_speed, filtered_gerrit_cole$game_number)
+Y <- lapply(Y, unname)
+sigma <- sd(unlist(Y))
+
+run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var, init_nu, init_pi, init_mu, numsamp) {
+    K <- length(init_mu)
+    G <- length(Y)
+    Tg <- sapply(Y, length)
+    total_pitches <- sum(Tg)
+
+    # Storage matrices
+    mu.samp <- matrix(NA, nrow = numsamp, ncol = K)
+    nu.samp <- matrix(NA, nrow = numsamp, ncol = K * K)
+    pi.samp <- matrix(NA, nrow = numsamp, ncol = K)
+    X.samp <- matrix(NA, nrow = numsamp, ncol = total_pitches)
+
+    # Current parameter values
+    curnu <- init_nu
+    curpi <- init_pi
+    curmu <- init_mu
+    X <- lapply(Tg, function(t) rep(NA, t))
+
+    for (iter in 1:numsamp) {
+        #### Block 1: FFBS — sample hidden states per game ####
+        for (g in 1:G) {
+            alpha <- matrix(NA, nrow = Tg[g], ncol = K)
+
+            # Forward pass
+            for (i in 1:K) {
+                alpha[1, i] <- curpi[i] * dnorm(Y[[g]][1], curmu[i], sigma)
+            }
+            if (Tg[g] > 1) {
+                for (t in 2:Tg[g]) {
+                    for (i in 1:K) {
+                        alpha[t, i] <- 0
+                        for (j in 1:K) {
+                            alpha[t, i] <- alpha[t, i] +
+                                alpha[t - 1, j] * curnu[j, i] * dnorm(Y[[g]][t], curmu[i], sigma)
+                        }
+                    }
+                }
+            }
+
+            # Backward sampling
+            prob_vec <- alpha[Tg[g], ] / sum(alpha[Tg[g], ])
+            X[[g]][Tg[g]] <- sample(1:K, size = 1, prob = prob_vec)
+            if (Tg[g] > 1) {
+                for (t in (Tg[g] - 1):1) {
+                    for (i in 1:K) {
+                        prob_vec[i] <- alpha[t, i] * curnu[i, X[[g]][t + 1]]
+                    }
+                    prob_vec <- prob_vec / sum(prob_vec)
+                    X[[g]][t] <- sample(1:K, size = 1, prob = prob_vec)
+                }
+            }
+        }
+
+        #### Block 2: Sample transition matrix ####
+        Nmat <- matrix(0, nrow = K, ncol = K)
+        for (g in 1:G) {
+            for (t in 2:Tg[g]) {
+                j <- X[[g]][t - 1]
+                k <- X[[g]][t]
+                Nmat[j, k] <- Nmat[j, k] + 1
+            }
+        }
+        for (j in 1:K) {
+            for (k in 1:K) {
+                curnu[j, k] <- rgamma(1, shape = Nmat[j, k] + prior_nu[j, k], rate = 1)
+            }
+            curnu[j, ] <- curnu[j, ] / sum(curnu[j, ])
+        }
+
+        #### Block 3: Sample initial distribution ####
+        init_count <- rep(0, K)
+        for (g in 1:G) {
+            init_count[X[[g]][1]] <- init_count[X[[g]][1]] + 1
+        }
+        for (j in 1:K) {
+            curpi[j] <- rgamma(1, shape = init_count[j] + prior_pi[j], rate = 1)
+        }
+        curpi <- curpi / sum(curpi)
+
+        #### Block 4: Sample emission means ####
+        for (j in 1:K) {
+            obs_j <- unlist(lapply(1:G, function(g) Y[[g]][X[[g]] == j]))
+            n_j <- length(obs_j)
+            if (n_j > 0) {
+                Y_bar_j <- mean(obs_j)
+                post_prec <- 1 / prior_mu_var + n_j / sigma^2
+                post_mean <- (prior_mu_mean[j] / prior_mu_var + n_j * Y_bar_j / sigma^2) / post_prec
+                curmu[j] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
+            } else {
+                curmu[j] <- rnorm(1, mean = prior_mu_mean[j], sd = sqrt(prior_mu_var))
+            }
+        }
+
+        #### Store samples ####
+        mu.samp[iter, ] <- curmu
+        nu.samp[iter, ] <- as.vector(curnu)
+        pi.samp[iter, ] <- curpi
+        X.samp[iter, ] <- unlist(X)
+    }
+
+    list(mu = mu.samp, nu = nu.samp, pi = pi.samp, X = X.samp, game_lengths = Tg)
+}
+
+fix_label_switching <- function(mu_mat, nu_mat, pi_mat, X_mat) {
+    n_iter <- nrow(mu_mat)
+    for (i in 1:n_iter) {
+        if (mu_mat[i, 1] > mu_mat[i, 2]) {
+            # Swap mu
+            temp_mu <- mu_mat[i, 1]
+            mu_mat[i, 1] <- mu_mat[i, 2]
+            mu_mat[i, 2] <- temp_mu
+
+            # Swap pi
+            temp_pi <- pi_mat[i, 1]
+            pi_mat[i, 1] <- pi_mat[i, 2]
+            pi_mat[i, 2] <- temp_pi
+
+            # Swap nu (column-major vectorization: nu11, nu21, nu12, nu22)
+            temp_nu11 <- nu_mat[i, 1]
+            temp_nu21 <- nu_mat[i, 2]
+            temp_nu12 <- nu_mat[i, 3]
+            temp_nu22 <- nu_mat[i, 4]
+            nu_mat[i, 1] <- temp_nu22
+            nu_mat[i, 4] <- temp_nu11
+            nu_mat[i, 2] <- temp_nu12
+            nu_mat[i, 3] <- temp_nu21
+
+            # Relabel X
+            current_X <- X_mat[i, ]
+            X_mat[i, current_X == 1] <- 2
+            X_mat[i, current_X == 2] <- 1
+        }
+    }
+    list(mu = mu_mat, nu = nu_mat, pi = pi_mat, X = X_mat)
+}
+```
+
+```{r}
+# Priors
+K <- 2
+prior_nu <- rbind(c(8, 1), c(1, 8))
+prior_pi <- c(6, 2)
+prior_mu_var <- 4 # SD = 2 mph
+numsamp <- 10000
+y_mean <- mean(unlist(Y))
+
+cache_file <- "data/gerrit_cole_chains.rds"
+
+if (file.exists(cache_file)) {
+    message("Loading cached chains from ", cache_file)
+    chains <- readRDS(cache_file)
+    chain1 <- chains$chain1
+    chain2 <- chains$chain2
+} else {
+    # Chain 1: starting values
+    chain1 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.75, 0.25), c(0.25, 0.75)),
+        init_pi = c(0.5, 0.5),
+        init_mu = c(y_mean - 1, y_mean + 1),
+        numsamp = numsamp
+    )
+
+    # Chain 2: different starting values
+    chain2 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.5, 0.5), c(0.5, 0.5)),
+        init_pi = c(0.75, 0.25),
+        init_mu = c(y_mean - 2, y_mean + 2),
+        numsamp = numsamp
+    )
+
+    saveRDS(list(chain1 = chain1, chain2 = chain2), cache_file)
+    message("Chains saved to ", cache_file)
+}
+
+# Fix label switching in each chain
+fixed1 <- fix_label_switching(chain1$mu, chain1$nu, chain1$pi, chain1$X)
+fixed2 <- fix_label_switching(chain2$mu, chain2$nu, chain2$pi, chain2$X)
+```
+
 ## MCMC Diagnostics
+
+```{r, fig.height=9}
+par(mfrow = c(4, 1))
+
+# mu1 (Baseline state mean)
+ymin <- min(fixed1$mu[, 1], fixed2$mu[, 1])
+ymax <- max(fixed1$mu[, 1], fixed2$mu[, 1])
+plot(1:numsamp, fixed1$mu[, 1],
+    type = "l", col = 2, ylim = c(ymin, ymax),
+    main = "Trace Plot: mu1 (Baseline)", ylab = "mu1", xlab = "Iteration"
+)
+lines(1:numsamp, fixed2$mu[, 1], col = 3)
+
+# mu2 (Hot state mean)
+ymin <- min(fixed1$mu[, 2], fixed2$mu[, 2])
+ymax <- max(fixed1$mu[, 2], fixed2$mu[, 2])
+plot(1:numsamp, fixed1$mu[, 2],
+    type = "l", col = 2, ylim = c(ymin, ymax),
+    main = "Trace Plot: mu2 (Hot)", ylab = "mu2", xlab = "Iteration"
+)
+lines(1:numsamp, fixed2$mu[, 2], col = 3)
+
+# nu12 (Baseline -> Hot transition probability); column 3 of column-major as.vector(nu)
+ymin <- min(fixed1$nu[, 3], fixed2$nu[, 3])
+ymax <- max(fixed1$nu[, 3], fixed2$nu[, 3])
+plot(1:numsamp, fixed1$nu[, 3],
+    type = "l", col = 2, ylim = c(ymin, ymax),
+    main = "Trace Plot: nu12 (Baseline -> Hot)", ylab = "nu12", xlab = "Iteration"
+)
+lines(1:numsamp, fixed2$nu[, 3], col = 3)
+
+# nu21 (Hot -> Baseline transition probability); column 2 of column-major as.vector(nu)
+ymin <- min(fixed1$nu[, 2], fixed2$nu[, 2])
+ymax <- max(fixed1$nu[, 2], fixed2$nu[, 2])
+plot(1:numsamp, fixed1$nu[, 2],
+    type = "l", col = 2, ylim = c(ymin, ymax),
+    main = "Trace Plot: nu21 (Hot -> Baseline)", ylab = "nu21", xlab = "Iteration"
+)
+lines(1:numsamp, fixed2$nu[, 2], col = 3)
+```
 
 ## Posterior Summaries
 
