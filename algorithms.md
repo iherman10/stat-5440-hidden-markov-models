@@ -9,10 +9,10 @@ The core algorithms (FFBS, Gibbs sampler) are unchanged in their logic. The adap
 
 This document covers **four permutations** of the baseball model:
 
-|  | Raw Probabilities | Log-Space |
-|---|---|---|
-| **2-State** (Baseline, Hot) | Section A | Section B |
-| **3-State** (Cold, Baseline, Hot) | Section C | Section D |
+|                                   | Raw Probabilities | Log-Space |
+| --------------------------------- | ----------------- | --------- |
+| **2-State** (Baseline, Hot)       | Section A         | Section B |
+| **3-State** (Cold, Baseline, Hot) | Section C         | Section D |
 
 All four share the same game-loop structure and Gibbs sampler skeleton. What changes across them is the dimension of the state space (affecting priors and label switching) and whether the forward pass uses raw or log-scale arithmetic (affecting only the alpha table computation inside FFBS).
 
@@ -322,10 +322,10 @@ With ~30–60 pitches per game and 2 states, you'll likely be fine in raw space.
 
 ### Label Switching Complexity
 
-| States | Permutations | Fix |
-|---|---|---|
-| 2 | 2 | Simple swap: if $\mu_1 > \mu_2$, swap everything |
-| 3 | 6 | Sort $\mu$ via `order()`, apply permutation to $\mu$, $\pi$, rows+cols of $\nu$, and state labels |
+| States | Permutations | Fix                                                                                               |
+| ------ | ------------ | ------------------------------------------------------------------------------------------------- |
+| 2      | 2            | Simple swap: if $\mu_1 > \mu_2$, swap everything                                                  |
+| 3      | 6            | Sort $\mu$ via `order()`, apply permutation to $\mu$, $\pi$, rows+cols of $\nu$, and state labels |
 
 Getting the 3-state permutation wrong (e.g., permuting only rows of $\nu$ but not columns) will silently corrupt your posterior. Test by checking that $\mu_1 < \mu_2 < \mu_3$ holds for every post-processed sample.
 
@@ -345,12 +345,12 @@ if (n_j > 0) {
 
 ## Quick Reference: What Changes Across Permutations
 
-| Component | 2-State Raw (A) | 2-State Log (B) | 3-State Raw (C) | 3-State Log (D) |
-|---|---|---|---|---|
-| **FFBS alpha table** | Raw products | Log sums + log-sum-exp | Raw products | Log sums + log-sum-exp |
-| **FFBS backward sampling** | Normalize raw alpha | exp(log - max), normalize | Normalize raw alpha | exp(log - max), normalize |
-| **Transition prior** | Dirichlet(8,1), (1,8) | Same as A | Dirichlet(8,1,1), (1,8,1), (1,1,8) | Same as C |
-| **$\pi$ prior** | Dirichlet(6, 2) | Same as A | Dirichlet(2, 6, 2) | Same as C |
-| **Label switching** | Simple swap | Same as A | `order()` + full permutation | Same as C |
-| **Gibbs Blocks 2–4** | $K = 2$ | Same as A | $K = 3$ | Same as C |
-| **Underflow risk** | Low | None | Moderate | None |
+| Component                  | 2-State Raw (A)       | 2-State Log (B)           | 3-State Raw (C)                    | 3-State Log (D)           |
+| -------------------------- | --------------------- | ------------------------- | ---------------------------------- | ------------------------- |
+| **FFBS alpha table**       | Raw products          | Log sums + log-sum-exp    | Raw products                       | Log sums + log-sum-exp    |
+| **FFBS backward sampling** | Normalize raw alpha   | exp(log - max), normalize | Normalize raw alpha                | exp(log - max), normalize |
+| **Transition prior**       | Dirichlet(8,1), (1,8) | Same as A                 | Dirichlet(8,1,1), (1,8,1), (1,1,8) | Same as C                 |
+| **$\pi$ prior**            | Dirichlet(6, 2)       | Same as A                 | Dirichlet(2, 6, 2)                 | Same as C                 |
+| **Label switching**        | Simple swap           | Same as A                 | `order()` + full permutation       | Same as C                 |
+| **Gibbs Blocks 2–4**       | $K = 2$               | Same as A                 | $K = 3$                            | Same as C                 |
+| **Underflow risk**         | Low                   | None                      | Moderate                           | None                      |
