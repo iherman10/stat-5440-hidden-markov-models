@@ -1,3 +1,4 @@
-examples/lecture23_cache/
-examples/lecture23_files/
 *.rds
+examples/
+project_planning/
+algorithms.md
