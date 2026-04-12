@@ -1,0 +1,761 @@
+---
+title: "Bayesian Hidden Markov Models to Infer Latent Pitcher States"
+author: "Garrett Lee, Trey Elder, Isaac Herman, Injun Lyo"
+date: ""
+output:
+  pdf_document:
+    extra_dependencies: ["float"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = FALSE,
+    fig.align = "center",
+    fig.pos = "H"
+)
+```
+
+# 1. Motivation
+
+## What Problem Does This Method Solve?
+
+## Why Can't Standard Regression Handle It?
+
+## Where Does It Show Up in Practice?
+
+---
+
+# 2. Model Specification
+
+## Likelihood
+
+## Priors
+
+## Hierarchical Structure
+
+## Key Modeling Assumptions
+
+---
+
+# 3. Applied Example
+
+## Data Description and Context
+
+We apply a Bayesian Hidden Markov Model to pitch-level velocity data for **Gerrit Cole**, a right-handed starting pitcher for the New York Yankees. Cole was selected for his high four-seam fastball usage rate and consistent full seasons of starts (30+ per year), giving us roughly 1,000–2,000 four-seam fastballs per season to work with.
+
+**Emission metric:** We model a single observable: `release_speed` (pitch velocity in mph) for four-seam fastballs only. Restricting to one pitch type is essential, since mixing pitch types would cause the HMM to discover pitch type as the hidden state rather than performance condition. Velocity is the most straightforward and interpretable signal of a pitcher's condition. Elevated velocity indicates peak effort, while declining velocity often signals fatigue. 
+
+**Hidden states:** The model posits two latent states, *Baseline* and *Hot*, representing the pitcher's true performance mode at each pitch. The state is unobserved; we only see the noisy velocity measurements that each state generates.
+
+**Game structure:** Pitches are grouped by game start, and each game is treated as an **independent sequence**. The hidden state resets at the beginning of each game. This reflects the reality that games are separated by 4–5 days of rest, so carry-over fatigue between games is not modeled.
+
+**Data source:** Pitch-level data come from MLB Statcast via the `baseballr` package, covering the 2019–2024 seasons. The raw data are fetched week-by-week and cached locally to avoid repeated API calls.
+
+### Load Data
+
+We pull pitch-level Statcast data for Gerrit Cole across the 2019–2024 MLB seasons. Data are retrieved in weekly chunks from Baseball Savant and saved locally so subsequent runs read from the cache rather than re-querying the API. All pitch types are retained at this stage; filtering to four-seam fastballs happens in the cleaning step. 
+
+```{r, message=FALSE, warning=FALSE}
+library(baseballr)
+library(tidyverse)
+
+pitcher_ids <- c(
+    "Gerrit Cole" = 543037,
+    "Kevin Gausman" = 592332,
+    "Logan Webb" = 657277,
+    "Zack Wheeler" = 554430,
+    "Sandy Alcantara" = 645261
+)
+
+# MLB season boundaries (2020 was COVID-shortened)
+seasons <- list(
+    list(start = "2019-03-28", end = "2019-09-29"),
+    list(start = "2020-07-23", end = "2020-09-27"),
+    list(start = "2021-04-01", end = "2021-10-03"),
+    list(start = "2022-04-07", end = "2022-10-05"),
+    list(start = "2023-03-30", end = "2023-10-01"),
+    list(start = "2024-04-01", end = "2024-09-29")
+)
+
+# Generate week-by-week date ranges across all seasons
+date_ranges <- map_dfr(seasons, function(s) {
+    start_dates <- seq(as.Date(s$start), as.Date(s$end) - 6, by = "7 days")
+    end_dates <- pmin(start_dates + 6, as.Date(s$end))
+    tibble(start = start_dates, end = end_dates)
+})
+
+fetch_week <- function(start_dt, end_dt, i, n, player_id) {
+    message(sprintf("[%d/%d] Pulling: %s to %s", i, n, start_dt, end_dt))
+
+    result <- tryCatch(
+        {
+            statcast_search(
+                start_date  = as.character(start_dt),
+                end_date    = as.character(end_dt),
+                playerid    = player_id,
+                player_type = "pitcher"
+            )
+        },
+        error = function(e) {
+            message(sprintf("[%d/%d] Error: %s", i, n, e$message))
+            return(NULL)
+        }
+    )
+
+    if (is.null(result) || nrow(result) == 0) {
+        return(NULL)
+    }
+    Sys.sleep(3)
+    return(result)
+}
+
+fetch_statcast <- function(player_name, player_id, cache_file) {
+    if (file.exists(cache_file)) {
+        message("Loading cached data from ", cache_file)
+        return(read_csv(cache_file, show_col_types = FALSE))
+    }
+
+    message("Scraping Statcast data for ", player_name, " — this will take ~10 minutes")
+    n_weeks <- nrow(date_ranges)
+    raw_data <- pmap_dfr(
+        list(date_ranges$start, date_ranges$end, seq_len(n_weeks), n_weeks, player_id),
+        fetch_week
+    )
+
+    df <- raw_data %>%
+        mutate(season = lubridate::year(as.Date(game_date))) %>%
+        select(
+            player_name, game_date, season,
+            pitch_type,
+            inning, at_bat_number, pitch_number,
+            release_speed, release_spin_rate,
+            pfx_x, pfx_z,
+            release_extension,
+            balls, strikes
+        )
+
+    write_csv(df, cache_file)
+    df
+}
+
+gerrit_cole <- fetch_statcast("Gerrit Cole", pitcher_ids[["Gerrit Cole"]], "data/gerrit_cole.csv")
+```
+
+Below is a sample of the raw data that was collected: 
+
+```{r}
+gerrit_cole |>
+    select(player_name, game_date, season, pitch_type, release_speed, release_spin_rate) |>
+    head() |>
+    knitr::kable(col.names = c("Pitcher", "Date", "Season", "Pitch Type", "Velocity (mph)", "Spin Rate (rpm)"))
+```
+
+### Clean Data
+
+We filter the raw data to four-seam fastballs for the 2024 season and restructure it into the format expected by the HMM. Within each season, games are numbered sequentially by date. Within each game, pitches are sorted by inning, then at-bat, then position within the at-bat to recover true chronological order, and renumbered 1, 2, 3, ... as a single game-level sequence.
+
+```{r}
+metrics_all <- c("release_speed", "release_spin_rate", "pfx_x", "pfx_z", "release_extension")
+
+get_player_data <- function(data, name, pitch_type = NULL, season_filter = NULL, metrics = NULL) {
+    if (is.null(metrics)) metrics <- metrics_all
+
+    data %>%
+        filter(player_name == name) %>%
+        {
+            if (!is.null(pitch_type)) filter(., pitch_type %in% !!pitch_type) else .
+        } %>%
+        {
+            if (!is.null(season_filter)) filter(., season %in% season_filter) else .
+        } %>%
+        group_by(season, game_date) %>%
+        arrange(inning, at_bat_number, pitch_number, .by_group = TRUE) %>%
+        mutate(pitch_number = row_number()) %>%
+        ungroup() %>%
+        group_by(season) %>%
+        mutate(game_number = dense_rank(game_date)) %>%
+        ungroup() %>%
+        select(season, player = player_name, game_number, pitch_number, all_of(metrics))
+}
+
+filtered_gerrit_cole <- get_player_data(gerrit_cole, "Cole, Gerrit", pitch_type = "FF", season_filter = max(gerrit_cole$season), metrics = "release_speed")
+filtered_gerrit_cole |>
+    head() |>
+    knitr::kable(col.names = c("Season", "Pitcher", "Game", "Pitch", "Velocity (mph)"))
+```
+
+\newpage
+
+## Fit Model
+
+### Prior Selection
+
+We need to center the Normal prior on each emission mean somewhere reasonable. As a starting point, we use Cole's historical velocity data from all seasons prior to 2024, split at the 75th percentile: the lower 75% of pitches approximate the Baseline state and the upper 25% approximate the Hot state. The mean of each group becomes the center of the corresponding prior. This is a rough heuristic. A 75/25 split doesn't correspond to any structural assumption about how often Cole is in each state. The intent is simply to give the sampler a sensible starting region rather than an uninformative flat prior. With thousands of 2024 pitches available, the likelihood will dominate and the prior centers matter little in practice.
+
+```{r}
+# Use pre-2024 seasons to get empirical prior means for each state
+historic_cole <- get_player_data(gerrit_cole, "Cole, Gerrit",
+    pitch_type = "FF",
+    season_filter = setdiff(unique(gerrit_cole$season), max(gerrit_cole$season)),
+    metrics = "release_speed"
+)
+
+# Split at the 75th percentile: baseline (lower 75%) vs. hot (upper 25%)
+q75 <- quantile(historic_cole$release_speed, 0.75)
+baseline_pitches <- historic_cole$release_speed[historic_cole$release_speed <= q75]
+hot_pitches <- historic_cole$release_speed[historic_cole$release_speed > q75]
+
+empirical_mu <- c(mean(baseline_pitches), mean(hot_pitches))
+
+tibble(
+    State = c("Baseline", "Hot"),
+    `Mean (mph)` = round(c(mean(baseline_pitches), mean(hot_pitches)), 2),
+    `SD (mph)` = round(c(sd(baseline_pitches), sd(hot_pitches)), 2),
+    `N (pitches)` = c(length(baseline_pitches), length(hot_pitches))
+) |>
+    knitr::kable()
+
+# Round to nearest integer for use as prior means
+prior_mu_mean <- c(96, 99)
+```
+
+The three sets of model parameters each receive their own prior.
+
+For the **emission means** ($\mu_k$), we use Normal priors centered on the empirical group means above, with a standard deviation of 2 mph. This is wide enough that the posterior is driven by the 2024 data, but anchored close enough to realistic velocity values that the sampler does not waste time exploring implausible regions.
+
+| State    | Prior mean (mph) | Prior SD (mph) |
+|----------|-----------------|----------------|
+| Baseline | 96              | 2              |
+| Hot      | 99              | 2              |
+
+For the **transition matrix rows** ($\nu_k$), we use Dirichlet priors that place more weight on self-transitions than on switching. A concentration parameter of 8 on the diagonal versus 1 on the off-diagonal reflects the prior belief that a pitcher's state tends to persist from one pitch to the next — states are sticky, not erratic.
+
+| Current state | Stay (Dirichlet param) | Switch (Dirichlet param) | Prior P(stay) |
+|---------------|------------------------|--------------------------|---------------|
+| Baseline      | 8                      | 1                        | ~89%          |
+| Hot           | 8                      | 1                        | ~89%          |
+
+For the **initial state distribution** ($\pi$), we use a Dirichlet prior that puts most of its weight on starting in the Baseline state at the beginning of each game. The asymmetry reflects the reasonable assumption that a pitcher is more likely to begin a start in a typical rather than elevated performance mode.
+
+| State    | Dirichlet param | Prior P(start here) |
+|----------|-----------------|---------------------|
+| Baseline | 6               | ~75%                |
+| Hot      | 2               | ~25%                |
+
+
+\newpage
+
+### Gibbs Sampler
+
+The HMM has three sets of unknown parameters: the emission means $\mu$, the transition matrix $\nu$, and the initial state distribution $\pi$, plus the hidden state sequence itself. Because the full joint posterior over all of these is intractable, we use a **Gibbs sampler**: a Markov chain Monte Carlo algorithm that cycles through each block of unknowns in turn, drawing from its conditional distribution given the current values of everything else. After a burn-in period, the chain's samples approximate the joint posterior.
+
+The hidden state sequences are a fourth unknown, but they are not a parameter in the usual sense. They are latent variables that must be integrated over. Because conditioning on the state sequences makes the parameter updates simple conjugate draws, we include them in the sampler and alternate between updating states and updating parameters.
+
+Each iteration of the sampler performs four steps:
+
+**Step 1: Sample hidden states (FFBS).** Given the current parameter values, we sample a complete hidden state sequence for each game independently using the **Forward-Filter Backward-Sample** algorithm. In the forward pass, we compute $\alpha_{t,k}$, the joint probability of the observed velocities up through pitch $t$ and being in state $k$ at pitch $t$. This recursion sweeps forward through the game, accumulating evidence. In the backward pass, we draw states from right to left: the last pitch's state is sampled from the normalized final forward probabilities, and each earlier state is sampled conditional on the state drawn immediately after it. This produces an exact draw from $p(\mathbf{z} \mid \mathbf{y}, \mu, \nu, \pi)$.
+
+Because games are independent sequences, hidden states reset at the start of each game, with no carry-over between starts. FFBS is run separately for each of the $G$ games per iteration.
+
+**Step 2: Sample transition probabilities ($\nu$).** Given the sampled state sequences, we count how many times each state-to-state transition occurs across all games. These counts, added to the Dirichlet prior parameters, form the posterior hyperparameters for each row of $\nu$. Each row is then drawn independently from its Dirichlet full conditional.
+
+**Step 3: Sample initial state distribution ($\pi$).** We count how many games begin in each state (i.e., look at the first sampled state of each game). Adding these counts to the Dirichlet prior on $\pi$ gives the posterior hyperparameters, from which we draw a new $\pi$.
+
+**Step 4: Sample emission means ($\mu_k$).** Given the state assignments for every pitch, we pool all pitches assigned to state $k$ across all games and compute their sample mean and count. Combined with the Normal prior, this gives a Normal full conditional for $\mu_k$, from which we draw directly. This step is repeated for each state.
+
+We also apply a **label-switching correction** after each iteration. Because the states $\{1, 2\}$ are exchangeable under the likelihood, the sampler can freely permute their labels between iterations. Without correction, samples from different chains would not be comparable. We fix this by enforcing a canonical ordering: after each draw, we sort the states by their emission means ($\mu_1 < \mu_2$), relabeling all state assignments, both rows and columns of $\nu$, and $\pi$ accordingly.
+
+To assess convergence and reduce dependence on starting values, we run **four independent chains** from different initializations and discard the first half of each chain as burn-in. We reshape the pitch-level data into $Y$, a list of length $G$ where $Y_g$ is the ordered vector of four-seam fastball velocities for game $g$. We also fix $\sigma$ to the empirical standard deviation of all 2024 velocities, a shared, known variance assumed by the model.
+
+```{r}
+# Reshape cleaned data into list-of-games format expected by the HMM
+Y <- split(filtered_gerrit_cole$release_speed, filtered_gerrit_cole$game_number)
+Y <- lapply(Y, unname)
+sigma <- sd(unlist(Y))
+
+run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var, init_nu, init_pi, init_mu, numsamp) {
+    K <- length(init_mu)
+    G <- length(Y)
+    Tg <- sapply(Y, length)
+    total_pitches <- sum(Tg)
+
+    # Storage matrices
+    mu.samp <- matrix(NA, nrow = numsamp, ncol = K)
+    nu.samp <- matrix(NA, nrow = numsamp, ncol = K * K)
+    pi.samp <- matrix(NA, nrow = numsamp, ncol = K)
+    X.samp <- matrix(NA, nrow = numsamp, ncol = total_pitches)
+
+    # Current parameter values
+    curnu <- init_nu
+    curpi <- init_pi
+    curmu <- init_mu
+    X <- lapply(Tg, function(t) rep(NA, t))
+
+    for (iter in 1:numsamp) {
+        #### Block 1: FFBS — sample hidden states per game ####
+        for (g in 1:G) {
+            alpha <- matrix(NA, nrow = Tg[g], ncol = K)
+
+            # Forward pass
+            for (i in 1:K) {
+                alpha[1, i] <- curpi[i] * dnorm(Y[[g]][1], curmu[i], sigma)
+            }
+            if (Tg[g] > 1) {
+                for (t in 2:Tg[g]) {
+                    for (i in 1:K) {
+                        alpha[t, i] <- 0
+                        for (j in 1:K) {
+                            alpha[t, i] <- alpha[t, i] +
+                                alpha[t - 1, j] * curnu[j, i] * dnorm(Y[[g]][t], curmu[i], sigma)
+                        }
+                    }
+                }
+            }
+
+            # Backward sampling
+            prob_vec <- alpha[Tg[g], ] / sum(alpha[Tg[g], ])
+            X[[g]][Tg[g]] <- sample(1:K, size = 1, prob = prob_vec)
+            if (Tg[g] > 1) {
+                for (t in (Tg[g] - 1):1) {
+                    for (i in 1:K) {
+                        prob_vec[i] <- alpha[t, i] * curnu[i, X[[g]][t + 1]]
+                    }
+                    prob_vec <- prob_vec / sum(prob_vec)
+                    X[[g]][t] <- sample(1:K, size = 1, prob = prob_vec)
+                }
+            }
+        }
+
+        #### Block 2: Sample transition matrix ####
+        Nmat <- matrix(0, nrow = K, ncol = K)
+        for (g in 1:G) {
+            for (t in 2:Tg[g]) {
+                j <- X[[g]][t - 1]
+                k <- X[[g]][t]
+                Nmat[j, k] <- Nmat[j, k] + 1
+            }
+        }
+        for (j in 1:K) {
+            for (k in 1:K) {
+                curnu[j, k] <- rgamma(1, shape = Nmat[j, k] + prior_nu[j, k], rate = 1)
+            }
+            curnu[j, ] <- curnu[j, ] / sum(curnu[j, ])
+        }
+
+        #### Block 3: Sample initial distribution ####
+        init_count <- rep(0, K)
+        for (g in 1:G) {
+            init_count[X[[g]][1]] <- init_count[X[[g]][1]] + 1
+        }
+        for (j in 1:K) {
+            curpi[j] <- rgamma(1, shape = init_count[j] + prior_pi[j], rate = 1)
+        }
+        curpi <- curpi / sum(curpi)
+
+        #### Block 4: Sample emission means ####
+        for (j in 1:K) {
+            obs_j <- unlist(lapply(1:G, function(g) Y[[g]][X[[g]] == j]))
+            n_j <- length(obs_j)
+            if (n_j > 0) {
+                Y_bar_j <- mean(obs_j)
+                post_prec <- 1 / prior_mu_var + n_j / sigma^2
+                post_mean <- (prior_mu_mean[j] / prior_mu_var + n_j * Y_bar_j / sigma^2) / post_prec
+                curmu[j] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
+            } else {
+                curmu[j] <- rnorm(1, mean = prior_mu_mean[j], sd = sqrt(prior_mu_var))
+            }
+        }
+
+        #### Store samples ####
+        mu.samp[iter, ] <- curmu
+        nu.samp[iter, ] <- as.vector(curnu)
+        pi.samp[iter, ] <- curpi
+        X.samp[iter, ] <- unlist(X)
+    }
+
+    list(mu = mu.samp, nu = nu.samp, pi = pi.samp, X = X.samp, game_lengths = Tg)
+}
+
+fix_label_switching <- function(mu_mat, nu_mat, pi_mat, X_mat) {
+    n_iter <- nrow(mu_mat)
+    for (i in 1:n_iter) {
+        if (mu_mat[i, 1] > mu_mat[i, 2]) {
+            # Swap mu
+            temp_mu <- mu_mat[i, 1]
+            mu_mat[i, 1] <- mu_mat[i, 2]
+            mu_mat[i, 2] <- temp_mu
+
+            # Swap pi
+            temp_pi <- pi_mat[i, 1]
+            pi_mat[i, 1] <- pi_mat[i, 2]
+            pi_mat[i, 2] <- temp_pi
+
+            # Swap nu (column-major vectorization: nu11, nu21, nu12, nu22)
+            temp_nu11 <- nu_mat[i, 1]
+            temp_nu21 <- nu_mat[i, 2]
+            temp_nu12 <- nu_mat[i, 3]
+            temp_nu22 <- nu_mat[i, 4]
+            nu_mat[i, 1] <- temp_nu22
+            nu_mat[i, 4] <- temp_nu11
+            nu_mat[i, 2] <- temp_nu12
+            nu_mat[i, 3] <- temp_nu21
+
+            # Relabel X
+            current_X <- X_mat[i, ]
+            X_mat[i, current_X == 1] <- 2
+            X_mat[i, current_X == 2] <- 1
+        }
+    }
+    list(mu = mu_mat, nu = nu_mat, pi = pi_mat, X = X_mat)
+}
+```
+
+
+```{r, message=FALSE}
+# Priors
+K <- 2
+prior_nu <- rbind(c(8, 1), c(1, 8))
+prior_pi <- c(6, 2)
+prior_mu_var <- 4 # SD = 2 mph
+numsamp <- 10000
+y_mean <- mean(unlist(Y))
+
+cache_file <- "data/gerrit_cole_chains.rds"
+
+if (file.exists(cache_file)) {
+    message("Loading cached chains from ", cache_file)
+    chains <- readRDS(cache_file)
+    chain1 <- chains$chain1
+    chain2 <- chains$chain2
+    chain3 <- chains$chain3
+    chain4 <- chains$chain4
+} else {
+    # Chain 1: near-prior starting values
+    chain1 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.75, 0.25), c(0.25, 0.75)),
+        init_pi = c(0.5, 0.5),
+        init_mu = c(y_mean - 1, y_mean + 1),
+        numsamp = numsamp
+    )
+
+    # Chain 2: dispersed starting values
+    chain2 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.5, 0.5), c(0.5, 0.5)),
+        init_pi = c(0.75, 0.25),
+        init_mu = c(y_mean - 2, y_mean + 2),
+        numsamp = numsamp
+    )
+
+    # Chain 3: strongly dispersed starting values
+    chain3 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.9, 0.1), c(0.1, 0.9)),
+        init_pi = c(0.25, 0.75),
+        init_mu = c(y_mean - 3, y_mean + 3),
+        numsamp = numsamp
+    )
+
+    # Chain 4: near-uniform starting values
+    chain4 <- run_gibbs_chain(
+        Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var,
+        init_nu = rbind(c(0.6, 0.4), c(0.4, 0.6)),
+        init_pi = c(0.5, 0.5),
+        init_mu = c(y_mean - 0.5, y_mean + 0.5),
+        numsamp = numsamp
+    )
+
+    saveRDS(list(chain1 = chain1, chain2 = chain2, chain3 = chain3, chain4 = chain4), cache_file)
+    message("Chains saved to ", cache_file)
+}
+
+# Fix label switching in each chain
+fixed1 <- fix_label_switching(chain1$mu, chain1$nu, chain1$pi, chain1$X)
+fixed2 <- fix_label_switching(chain2$mu, chain2$nu, chain2$pi, chain2$X)
+fixed3 <- fix_label_switching(chain3$mu, chain3$nu, chain3$pi, chain3$X)
+fixed4 <- fix_label_switching(chain4$mu, chain4$nu, chain4$pi, chain4$X)
+```
+
+\newpage
+
+## MCMC Diagnostics
+
+We ran four independent Gibbs chains from different starting values to check convergence. Trace plots show the sampled value of each parameter at every iteration. Four well-mixed chains that overlap and wander around the same region, rather than drifting apart or getting stuck, are the primary visual signal that the sampler has converged.
+
+We monitor all sampled scalar parameters across three figures: emission means ($\mu_1$, $\mu_2$), all four transition probabilities ($\nu_{11}$, $\nu_{12}$, $\nu_{21}$, $\nu_{22}$), and the initial state distribution ($\pi_1$, $\pi_2$).
+
+### Initial Samples
+
+These are the raw trace plots from the Gibbs sampler: every draw from all 10,000 iterations, with no post-processing applied. Consecutive samples from a Gibbs chain are not independent: each draw depends on the one before it, so the chain can exhibit autocorrelation, where successive values move slowly and the effective number of independent samples is much smaller than the raw count.
+
+```{r trace-plot-fns, include=FALSE}
+fixed_chains <- list(
+    "Chain 1" = fixed1, "Chain 2" = fixed2,
+    "Chain 3" = fixed3, "Chain 4" = fixed4
+)
+
+plot_trace_mu <- function(chains, numsamp) {
+    mu_long <- bind_rows(
+        imap(chains, ~ tibble(
+            iteration = 1:numsamp, chain = .y,
+            `mu1 (Baseline)` = .x$mu[, 1], `mu2 (Hot)` = .x$mu[, 2]
+        ))
+    ) |>
+        pivot_longer(cols = -c(iteration, chain), names_to = "parameter", values_to = "value") |>
+        mutate(parameter = factor(parameter, levels = c("mu1 (Baseline)", "mu2 (Hot)")))
+
+    ggplot(mu_long, aes(x = iteration, y = value, color = chain)) +
+        geom_line(linewidth = 0.3, alpha = 0.9) +
+        facet_wrap(~parameter, ncol = 2, scales = "fixed") +
+        coord_cartesian(ylim = c(94, 98)) +
+        labs(title = "Emission Means", x = "Iteration", y = "mph", color = NULL) +
+        theme_bw() +
+        theme(legend.position = "right", strip.text = element_text(face = "bold"))
+}
+
+plot_trace_nu <- function(chains, numsamp) {
+    nu_long <- bind_rows(
+        imap(chains, ~ tibble(
+            iteration = 1:numsamp, chain = .y,
+            `nu11 (Baseline->Baseline)` = .x$nu[, 1],
+            `nu12 (Baseline->Hot)` = .x$nu[, 3],
+            `nu21 (Hot->Baseline)` = .x$nu[, 2],
+            `nu22 (Hot->Hot)` = .x$nu[, 4]
+        ))
+    ) |>
+        pivot_longer(cols = -c(iteration, chain), names_to = "parameter", values_to = "value") |>
+        mutate(parameter = factor(parameter, levels = c(
+            "nu11 (Baseline->Baseline)", "nu12 (Baseline->Hot)",
+            "nu21 (Hot->Baseline)",      "nu22 (Hot->Hot)"
+        )))
+
+    ggplot(nu_long, aes(x = iteration, y = value, color = chain)) +
+        geom_line(linewidth = 0.3, alpha = 0.9) +
+        facet_wrap(~parameter, ncol = 2, scales = "fixed") +
+        coord_cartesian(ylim = c(0, 1)) +
+        labs(title = "Transition Probabilities", x = "Iteration", y = "Probability", color = NULL) +
+        theme_bw() +
+        theme(legend.position = "right", strip.text = element_text(face = "bold"))
+}
+
+plot_trace_pi <- function(chains, numsamp) {
+    pi_long <- bind_rows(
+        imap(chains, ~ tibble(
+            iteration = 1:numsamp, chain = .y,
+            `pi1 (Baseline)` = .x$pi[, 1], `pi2 (Hot)` = .x$pi[, 2]
+        ))
+    ) |>
+        pivot_longer(cols = -c(iteration, chain), names_to = "parameter", values_to = "value") |>
+        mutate(parameter = factor(parameter, levels = c("pi1 (Baseline)", "pi2 (Hot)")))
+
+    ggplot(pi_long, aes(x = iteration, y = value, color = chain)) +
+        geom_line(linewidth = 0.3, alpha = 0.9) +
+        facet_wrap(~parameter, ncol = 2, scales = "fixed") +
+        coord_cartesian(ylim = c(0, 1)) +
+        labs(title = "Initial State Distribution", x = "Iteration", y = "Probability", color = NULL) +
+        theme_bw() +
+        theme(legend.position = "right", strip.text = element_text(face = "bold"))
+}
+
+plot_acf_mu <- function(chains) {
+    ci <- qnorm(0.975) / sqrt(nrow(chains[[1]]$mu))
+    ch <- chains[[1]]
+    acf_data <- bind_rows(
+        {
+            a <- acf(ch$mu[, 1], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "mu1 (Baseline)")
+        },
+        {
+            a <- acf(ch$mu[, 2], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "mu2 (Hot)")
+        }
+    ) |>
+        mutate(parameter = factor(parameter, levels = c("mu1 (Baseline)", "mu2 (Hot)")))
+
+    ggplot(acf_data, aes(x = lag, y = acf)) +
+        geom_hline(yintercept = 0) +
+        geom_segment(aes(xend = lag, yend = 0)) +
+        geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "steelblue") +
+        facet_wrap(~parameter, ncol = 2) +
+        labs(title = "ACF: Emission Means", x = "Lag", y = "ACF") +
+        theme_bw() +
+        theme(strip.text = element_text(face = "bold"))
+}
+
+plot_acf_nu <- function(chains) {
+    ci <- qnorm(0.975) / sqrt(nrow(chains[[1]]$nu))
+    ch <- chains[[1]]
+    acf_data <- bind_rows(
+        {
+            a <- acf(ch$nu[, 1], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "nu11 (Baseline->Baseline)")
+        },
+        {
+            a <- acf(ch$nu[, 3], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "nu12 (Baseline->Hot)")
+        },
+        {
+            a <- acf(ch$nu[, 2], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "nu21 (Hot->Baseline)")
+        },
+        {
+            a <- acf(ch$nu[, 4], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "nu22 (Hot->Hot)")
+        }
+    ) |>
+        mutate(parameter = factor(parameter, levels = c(
+            "nu11 (Baseline->Baseline)", "nu12 (Baseline->Hot)",
+            "nu21 (Hot->Baseline)",      "nu22 (Hot->Hot)"
+        )))
+
+    ggplot(acf_data, aes(x = lag, y = acf)) +
+        geom_hline(yintercept = 0) +
+        geom_segment(aes(xend = lag, yend = 0)) +
+        geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "steelblue") +
+        facet_wrap(~parameter, ncol = 2) +
+        labs(title = "ACF: Transition Probabilities", x = "Lag", y = "ACF") +
+        theme_bw() +
+        theme(strip.text = element_text(face = "bold"))
+}
+
+plot_acf_pi <- function(chains) {
+    ci <- qnorm(0.975) / sqrt(nrow(chains[[1]]$pi))
+    ch <- chains[[1]]
+    acf_data <- bind_rows(
+        {
+            a <- acf(ch$pi[, 1], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "pi1 (Baseline)")
+        },
+        {
+            a <- acf(ch$pi[, 2], plot = FALSE)
+            tibble(lag = as.numeric(a$lag), acf = as.numeric(a$acf), parameter = "pi2 (Hot)")
+        }
+    ) |>
+        mutate(parameter = factor(parameter, levels = c("pi1 (Baseline)", "pi2 (Hot)")))
+
+    ggplot(acf_data, aes(x = lag, y = acf)) +
+        geom_hline(yintercept = 0) +
+        geom_segment(aes(xend = lag, yend = 0)) +
+        geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "steelblue") +
+        facet_wrap(~parameter, ncol = 2) +
+        labs(title = "ACF: Initial State Distribution", x = "Lag", y = "ACF") +
+        theme_bw() +
+        theme(strip.text = element_text(face = "bold"))
+}
+```
+
+```{r trace-mu, fig.height=3}
+plot_trace_mu(fixed_chains, numsamp)
+```
+
+```{r trace-nu, fig.height=5}
+plot_trace_nu(fixed_chains, numsamp)
+```
+
+```{r trace-pi, fig.height=3}
+plot_trace_pi(fixed_chains, numsamp)
+```
+
+\newpage
+
+### Thinned Samples
+
+To diagnose autocorrelation, we compute the **autocorrelation function (ACF)** for each parameter. The ACF measures the correlation between a chain's samples at lag $k$, that is, how similar a draw is to the draw $k$ steps before it. High autocorrelation at moderate lags (say, lags 1–10) indicates that the chain is moving slowly through the posterior and that many consecutive samples carry nearly the same information. The lag at which the ACF first drops close to zero tells us the minimum spacing needed for approximately independent draws.
+
+```{r acf-mu, fig.height=3}
+plot_acf_mu(fixed_chains)
+```
+
+```{r acf-nu, fig.height=5}
+plot_acf_nu(fixed_chains)
+```
+
+```{r acf-pi, fig.height=3}
+plot_acf_pi(fixed_chains)
+```
+
+Based on the ACF, we thin the chain by keeping only every $k$-th sample, where $k$ is chosen to be at or beyond the lag where autocorrelation becomes negligible. Thinning reduces the effective sample size but produces a set of draws that are much closer to independent, which makes posterior summaries and credible intervals more reliable. The trace plots below show the sampled values after thinning.
+
+The ACF plots above show that autocorrelation across all parameters decays fully by roughly lag 8–10. We discard the first 1,000 iterations as burn-in to ensure the starting values have no influence on inference, then thin by keeping every 10th sample. This leaves 900 draws per chain (3,600 combined), which is enough for stable posterior summaries.
+
+```{r thinning}
+burn_in <- 1000
+thin_k <- 10
+postburn <- (burn_in + 1):numsamp
+thin_idx <- postburn[seq(1, length(postburn), by = thin_k)]
+
+thinned_chains <- lapply(fixed_chains, function(ch) {
+    list(
+        mu = ch$mu[thin_idx, ],
+        nu = ch$nu[thin_idx, ],
+        pi = ch$pi[thin_idx, ],
+        X  = ch$X[thin_idx]
+    )
+})
+numsamp_thinned <- length(thin_idx)
+```
+
+```{r thinned-trace-mu, fig.height=3}
+plot_trace_mu(thinned_chains, numsamp_thinned)
+```
+
+```{r thinned-trace-nu, fig.height=5}
+plot_trace_nu(thinned_chains, numsamp_thinned)
+```
+
+```{r thinned-trace-pi, fig.height=3}
+plot_trace_pi(thinned_chains, numsamp_thinned)
+```
+
+## Posterior Summaries
+
+```{r posterior-summaries}
+# Pool thinned draws across all four chains
+mu_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "mu"))
+nu_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "nu"))
+pi_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "pi"))
+
+summarise_param <- function(draws, name) {
+    tibble(
+        Parameter = name,
+        Mean      = mean(draws),
+        SD        = sd(draws),
+        `10%`     = quantile(draws, 0.10),
+        `90%`     = quantile(draws, 0.90)
+    )
+}
+
+posterior_table <- bind_rows(
+    summarise_param(mu_pool[, 1], "mu1 (Baseline mean, mph)"),
+    summarise_param(mu_pool[, 2], "mu2 (Hot mean, mph)"),
+    summarise_param(nu_pool[, 1], "nu11 (Baseline -> Baseline)"),
+    summarise_param(nu_pool[, 3], "nu12 (Baseline -> Hot)"),
+    summarise_param(nu_pool[, 2], "nu21 (Hot -> Baseline)"),
+    summarise_param(nu_pool[, 4], "nu22 (Hot -> Hot)"),
+    summarise_param(pi_pool[, 1], "pi1 (Pr. start Baseline)"),
+    summarise_param(pi_pool[, 2], "pi2 (Pr. start Hot)")
+)
+
+knitr::kable(
+    posterior_table,
+    digits  = 3,
+    caption = "Posterior summaries from 3,600 thinned draws (4 chains × 900 samples). CI bounds are the 10th and 90th percentiles."
+)
+```
+
+## Posterior Predictive Checks
+
+## Visualizations
+
+---
+
+# 4. Interpretation
+
+## What Did We Learn?
+
+## Limitations
+
+## When Should We Use This Model?
+
+## Sensitivity to Modeling Assumptions
