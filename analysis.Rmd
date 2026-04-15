@@ -690,7 +690,10 @@ thinned_chains <- lapply(fixed_chains, function(ch) {
         mu = ch$mu[thin_idx, ],
         nu = ch$nu[thin_idx, ],
         pi = ch$pi[thin_idx, ],
-        X  = ch$X[thin_idx]
+        # ch$X is a (numsamp x total_pitches) matrix; drop = FALSE keeps it
+        # 2D when thin_idx happens to be length 1 and prevents column-major
+        # linear indexing from silently returning the wrong elements.
+        X  = ch$X[thin_idx, , drop = FALSE]
     )
 })
 numsamp_thinned <- length(thin_idx)
@@ -745,6 +748,7 @@ knitr::kable(
 ```
 
 ## Posterior Predictive Checks
+
 
 ## Visualizations
 
