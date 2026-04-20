@@ -1,0 +1,122 @@
+---
+title: "Garrett_Writeup"
+output: pdf_document
+date: "2026-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Model Specification
+
+## Likelihood
+
+### Independent Hidden Markov Sequences
+
+We model pitch-level velocity data using an HMM, where each game is treated as an independent sequence. Let \( y_{g,t} \) denote the observed four-seam fastball velocity for pitch \( t \) in game \( g \), and let \( z_{g,t} \in \{1,2\} \) denote the corresponding latent state, representing *Baseline* and *Hot* performance regimes.
+
+Conditional on the latent state, the observed velocity is modeled as:
+\[
+y_{g,t} \mid z_{g,t} = k \sim \mathcal{N}(\mu_k, \sigma^2),
+\]
+where \( \mu_k \) is the state-specific mean velocity and \( \sigma^2 \) is a shared variance parameter, fixed using empirical variation from the 2024 season.
+
+### First-Order Markov State Evolution
+
+The latent state evolves according to a first-order Markov process:
+\[
+P(z_{g,t} = k \mid z_{g,t-1} = j) = \nu_{j,k},
+\]
+where \( \nu \) is a \( 2 \times 2 \) transition matrix. This implies that the current state depends only on the immediately preceding state, not on the full history of past states. This assumption induces temporal persistence in the latent performance state.
+
+### Initial State and Modeling Choices
+
+At the beginning of each game, the latent state is drawn from an initial distribution:
+\[
+z_{g,1} \sim \text{Categorical}(\pi),
+\]
+where \( \pi \) is a vector of initial state probabilities. Treating games as independent sequences reflects the assumption that latent performance states do not carry over across games, which is reasonable given rest periods between starts.
+
+We restrict attention to four-seam fastballs and use velocity as the sole observable. This choice ensures interpretability and prevents the latent states from capturing pitch type rather than underlying performance condition.
+
+
+
+## Priors
+
+We place independent priors on the emission means \( \mu \), the transition matrix \( \nu \), and the initial state distribution \( \pi \).
+
+### Emission Means
+
+The state-specific means are assigned Normal priors:
+\[
+\mu_k \sim \mathcal{N}(m_k, s^2),
+\]
+where \( m_k \) is derived from historical pre-2024 velocity data and \( s = 2 \) mph provides a diffuse prior. Specifically, historical velocities are split at the 75th percentile to define approximate baseline and hot regimes, yielding prior centers near 96 mph and 99 mph.
+
+Importantly, this does not imply that 75\% of pitches are assumed to belong to the baseline state. Rather, this split serves only as a heuristic for centering the priors:
+\[
+\text{Before observing 2024 data, we believe } \mu_1 \approx 96 \text{ and } \mu_2 \approx 99,
+\]
+with substantial uncertainty allowed by the prior variance.
+
+### Transition Probabilities
+
+Each row of the transition matrix is assigned a Dirichlet prior:
+\[
+\nu_j \sim \text{Dirichlet}(\alpha_{j1}, \alpha_{j2}),
+\]
+with concentration parameters chosen to favor self-transitions (here we set \( \alpha_{jj} = 8 \), \( \alpha_{jk} = 1 \) for \( j \neq k \)). This reflects the belief that pitcher condition is persistent rather than rapidly switching between states.
+
+### Initial State Distribution
+
+The initial state distribution is also assigned a Dirichlet prior:
+\[
+\pi \sim \text{Dirichlet}(\gamma_1, \gamma_2),
+\]
+with greater weight placed on the baseline state, reflecting the expectation that pitchers are more likely to begin a game in a typical performance condition.
+
+### Role of the Dirichlet Prior
+
+The Dirichlet distribution is a natural prior for probability vectors that must be non-negative and sum to one. It can be viewed as a multivariate generalization of the Beta distribution. Its conjugacy with multinomial-type counts is particularly useful in this setting: once latent states are sampled, posterior updates reduce to adding observed transition counts to prior parameters, enabling efficient Gibbs sampling.
+
+
+
+## Hierarchical Structure
+
+The model has a hierarchical structure defined by its generative process. At the highest level are global parameters shared across all games: the emission means \( \mu \), transition probabilities \( \nu \), and initial distribution \( \pi \). At the intermediate level are the latent state sequences \( \{z_{g,t}\} \), which evolve within each game according to the Markov process. At the lowest level are the observed velocities \( y_{g,t} \), generated conditionally on the latent states.
+
+This defines the generative hierarchy:
+\[
+(\mu, \nu, \pi) \rightarrow z_{g,t} \rightarrow y_{g,t}.
+\]
+
+It is important to emphasize that this is a **latent variable hierarchy**, not a multilevel random effects model. The model does not include group-specific parameters drawn from higher-level distributions and therefore does not perform partial pooling across games or players.
+
+
+
+## Key Modeling Assumptions
+
+Several assumptions underlie the model specification.
+
+First, the model assumes exactly two latent performance states. This imposes a binary structure on pitcher condition. If the true process exhibits more nuanced or continuous variation, the model will compress this variation into two regimes. Increasing the number of states could improve flexibility but may reduce interpretability and increase the risk of overfitting.
+
+Second, the model assumes time-homogeneous transitions:
+\[
+P(z_{g,t} \mid z_{g,t-1}) \text{ is constant over } t.
+\]
+In practice, transition dynamics may depend on pitch count, fatigue, or inning, which are not explicitly modeled here.
+
+Third, the emission distribution is assumed to be Normal:
+\[
+y_{g,t} \mid z_{g,t} = k \sim \mathcal{N}(\mu_k, \sigma^2),
+\]
+implying symmetric, unimodal variation within each state. Real velocity data may exhibit skewness, heavy tails, or within-game trends, which this specification cannot capture.
+
+Finally, the model fixes the variance \( \sigma^2 \) across states and uses a single observable (velocity). This simplifies estimation but restricts the model to capturing only one dimension of performance variation.
+
+Because HMM states are label-invariant under the likelihood, the model imposes an ordering constraint:
+\[
+\mu_1 < \mu_2,
+\]
+so that state 1 corresponds to *Baseline* and state 2 corresponds to *Hot*. This ensures interpretability and consistency across posterior samples.
