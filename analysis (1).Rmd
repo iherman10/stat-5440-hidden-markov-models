@@ -1667,8 +1667,57 @@ knitr::kable(
     caption = "Posterior summaries from the HMM with state-specific variances and a linear pitch-number trend."
 )
 ```
-### Posterior Predictive Simulation (Revised Model)
 
+### Revised HMM Convergence Diagnostics 
+The revised model shows strong convergence across all parameters. All \(\hat{R}\) values are essentially 1.00–1.001, indicating that the four chains have mixed well and are sampling from the same posterior distribution.
+
+ESS is large for all parameters, generally in the thousands, suggesting low autocorrelation and reliable posterior estimates. In particular, the variance and initial state parameters exhibit very high ESS, indicating especially stable inference.
+
+Overall, these diagnostics provide strong evidence that the Gibbs sampler has converged and that the posterior summaries can be trusted.
+```{r}
+make_draws_df <- function(ch) {
+    tibble(
+        mu1 = ch$mu[, 1],
+        mu2 = ch$mu[, 2],
+        beta = ch$beta,
+        sig2_1 = ch$sig2[, 1],
+        sig2_2 = ch$sig2[, 2],
+        nu11 = ch$nu[, 1],
+        nu21 = ch$nu[, 2],
+        nu12 = ch$nu[, 3],
+        nu22 = ch$nu[, 4],
+        pi1 = ch$pi[, 1],
+        pi2 = ch$pi[, 2]
+    )
+}
+
+# Convert to posterior draws object
+draws_list <- list(
+    make_draws_df(fixed1),
+    make_draws_df(fixed2),
+    make_draws_df(fixed3),
+    make_draws_df(fixed4)
+)
+
+draws_array <- as_draws_array(draws_list)
+
+# Summarize convergence diagnostics
+diagnostics <- summarise_draws(
+    draws_array,
+    mean,
+    sd,
+    rhat,
+    ess_bulk,
+    ess_tail
+)
+
+knitr::kable(
+    diagnostics,
+    digits = 3,
+    caption = "Convergence diagnostics for the revised HMM."
+)
+```
+### Posterior Predictive Simulation (Revised Model)
 For the revised model, posterior predictive datasets are generated in the same way as before, but using the expanded emission structure. Each replicated game is simulated from the fitted HMM with state-specific means, a linear pitch-number trend, and state-specific variances:
 \[
 y_{g,t} \mid z_{g,t}=k \sim \mathcal{N}(\mu_k + \beta x_{g,t}, \sigma_k^2).
@@ -1921,6 +1970,7 @@ ggplot() +
     ) +
     theme_bw()
 ```
+
 
 ---
 \newpage
