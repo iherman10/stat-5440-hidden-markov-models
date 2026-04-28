@@ -43,9 +43,9 @@ ggplot(grid_data, aes(x = to, y = from)) +
     geom_text(aes(label = label), size = 8, fontface = "bold", color = "steelblue") +
     scale_x_discrete(position = "top") +
     labs(
-        title   = "Bob's Transition Probabilities",
-        x       = "Tomorrow's Activity",
-        y       = "Today's Activity"
+        title = "Bob's Transition Probabilities",
+        x = "Tomorrow's Activity",
+        y = "Today's Activity"
     ) +
     theme_minimal() +
     theme(
@@ -256,9 +256,9 @@ fetch_week <- function(start_dt, end_dt, i, n, player_id) {
     result <- tryCatch(
         {
             statcast_search(
-                start_date  = as.character(start_dt),
-                end_date    = as.character(end_dt),
-                playerid    = player_id,
+                start_date = as.character(start_dt),
+                end_date = as.character(end_dt),
+                playerid = player_id,
                 player_type = "pitcher"
             )
         },
@@ -1003,9 +1003,7 @@ The plot below pairs observed fastball velocity (top row) with the posterior $P(
 **How this lines up with reality:** Cole's 2024 was cut in half by an elbow injury that sidelined him through mid-June, which is why "game 2" in this plot is already June 25 and "game 9" lands on August 10. The two starts bracket his comeback arc. Game 2 was his second outing back, a Subway Series loss in which he struggled and next-day coverage ran with headlines like *"Gerrit Cole's Subway Series clobbering comes with stark velocity concerns"* (Joyce, *NY Post*, 2024-06-25). Game 9 was the opposite: six scoreless innings and a season-high ten strikeouts against Texas, widely reported as a return to ace form. The HMM never saw a box score or a headline, it only saw release speeds, but the pitch-level posterior on these two starts already encodes what the writers were saying at the time, which is a useful sanity check that the latent "Hot" state is picking up something real.
 
 ```{r viz-state-velocity-stack, fig.height=4}
-# Pool thinned X across chains and compute per-pitch P(Hot). This block is
-# self-contained for the visualization section; it can be hoisted into a
-# dedicated State Decoding section later without changing anything here.
+# Pool thinned X across chains and compute per-pitch P(Hot).
 X_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "X"))
 stopifnot(ncol(X_pool) == sum(sapply(Y, length)))
 p_hot_flat <- colMeans(X_pool == 2)
@@ -1017,11 +1015,7 @@ posterior_states <- filtered_gerrit_cole |>
 mu_baseline_hat <- mean(mu_pool[, 1])
 mu_hot_hat <- mean(mu_pool[, 2])
 
-# Pick 3 games that span the within-game sd(p_hot) distribution: the
-# minimum, median, and maximum sd among games with >= 30 pitches. Reading
-# the facet columns left-to-right gives flat -> mixed -> dynamic, which
-# shows the full range of HMM behavior across the season (and doubles as
-# a sanity check: the min-sd game should have a nearly flat P(Hot) panel).
+# Pick 3 games that span the within-game sd(p_hot) distribution
 games_to_show <- posterior_states |>
     group_by(game_number) |>
     summarise(n_pitches = n(), sd_p = sd(p_hot), .groups = "drop") |>
@@ -1030,14 +1024,10 @@ games_to_show <- posterior_states |>
     slice(c(1, ceiling(n() / 2), n())) |>
     pull(game_number)
 
-# Long format: two rows per pitch (velocity + P(Hot)). facet_grid with
-# scales = "free_y" gives each metric row its own units — the native
-# ggplot equivalent of par(mfrow).
+# Long format: two rows per pitch (velocity + P(Hot)).
 plot_df <- posterior_states |>
     filter(game_number %in% games_to_show) |>
     select(game_number, pitch_number, release_speed, p_hot) |>
-    # Factor levels in games_to_show order so the facet columns read
-    # left-to-right as flat -> mixed -> dynamic instead of by game number.
     mutate(game_number = factor(game_number, levels = games_to_show)) |>
     pivot_longer(
         cols      = c(release_speed, p_hot),
@@ -1050,9 +1040,8 @@ plot_df <- posterior_states |>
         labels = c("Velocity (mph)", "P(Hot)")
     ))
 
-# Reference lines: mu_Baseline and mu_Hot on the velocity panel, 0.5 decision
-# threshold on the P(Hot) panel. Tagged with `metric` so facet_grid only
-# draws each line in the correct row.
+# Reference lines: mu_Baseline and mu_Hot on the velocity panel,
+# 0.5 decision threshold on the P(Hot) panel.
 ref_lines <- tibble(
     metric = factor(
         c("Velocity (mph)", "Velocity (mph)", "P(Hot)"),
@@ -1095,10 +1084,7 @@ The figure below asks a simpler question: *on average, how hot is Cole as a func
 The curve tells a clean warm-up story. The first few pitches sit deep in the Baseline state, the estimate climbs monotonically and crosses 0.5 early in the outing, and from roughly the middle of a start onward it plateaus above 0.5 for the rest of the game. This is the familiar pattern of a pitcher getting loose in the first inning, now showing up in the pitch-level posterior. The credible interval is tightest through the middle of a start, where dozens of games contribute, and widens at both ends where fewer games support the estimate.
 
 ```{r viz-mean-p-hot, fig.height=3.2}
-# For each pitch position t within a game, compute the across-game mean of
-# P(Hot) *separately in every Gibbs draw*, then summarize that distribution.
-# The posterior mean gives the point estimate; the 2.5/97.5 quantiles give a
-# 95% credible interval on "fraction of games that were Hot at pitch t."
+# For each pitch position t within a game, compute the across-game mean
 
 game_lengths <- sapply(Y, length)
 game_ends <- cumsum(game_lengths)
@@ -1108,8 +1094,7 @@ n_draws <- nrow(X_pool)
 max_len <- max(game_lengths)
 
 # Accumulate, for each (draw, pitch position), the number of games in state
-# Hot and the number of games that reached that pitch. hot_by_draw[s, t] is
-# then the across-game mean P(Hot) at pitch t in draw s.
+# Hot and the number of games that reached that pitch.
 hot_sum <- matrix(0, nrow = n_draws, ncol = max_len)
 n_games_t <- integer(max_len)
 for (g in seq_len(G)) {
@@ -1120,8 +1105,8 @@ for (g in seq_len(G)) {
 }
 hot_by_draw <- sweep(hot_sum, 2, n_games_t, `/`)
 
-# Posterior mean and 95% credible interval across Gibbs draws, then drop the
-# deep-in-game tail where only a handful of long starts contribute.
+# Posterior mean and 95% credible interval across Gibbs draws, then
+# drop the deep-in-game tail where only a handful of long starts contribute.
 ci <- apply(hot_by_draw, 2, quantile, probs = c(0.025, 0.975))
 mean_p_hot_by_t <- tibble(
     pitch_number = seq_len(max_len),
@@ -1830,10 +1815,10 @@ pi_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "pi"))
 summarise_param <- function(draws, name) {
     tibble(
         Parameter = name,
-        Mean      = mean(draws),
-        SD        = sd(draws),
-        `10%`     = quantile(draws, 0.10),
-        `90%`     = quantile(draws, 0.90)
+        Mean = mean(draws),
+        SD = sd(draws),
+        `10%` = quantile(draws, 0.10),
+        `90%` = quantile(draws, 0.90)
     )
 }
 
@@ -2094,14 +2079,14 @@ rep_density_df <- purrr::map_dfr(overlay_draws, function(s) {
     d <- density(
         y_rep,
         from = min(y_obs) - 1,
-        to   = max(y_obs) + 1,
-        n    = 512
+        to = max(y_obs) + 1,
+        n = 512
     )
 
     tibble(
         velocity = d$x,
-        density  = d$y,
-        draw     = paste0("rep_", s)
+        density = d$y,
+        draw = paste0("rep_", s)
     )
 })
 
@@ -2114,7 +2099,7 @@ obs_density <- density(
 
 obs_density_df <- tibble(
     velocity = obs_density$x,
-    density  = obs_density$y
+    density = obs_density$y
 )
 
 ggplot() +
