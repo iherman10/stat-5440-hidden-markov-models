@@ -350,8 +350,6 @@ filtered_gerrit_cole |>
     knitr::kable(col.names = c("Season", "Pitcher", "Game", "Pitch", "Velocity (mph)"))
 ```
 
-\newpage
-
 ## Fit Model
 
 ### Prior Selection
@@ -470,24 +468,25 @@ run_gibbs_chain <- function(
     Tg <- sapply(Y, length)
     total_pitches <- sum(Tg)
 
-    # Storage matrices
+    # Storage for posterior draws (one row = one iteration)
     mu.samp <- matrix(NA, nrow = numsamp, ncol = K)
     nu.samp <- matrix(NA, nrow = numsamp, ncol = K * K)
     pi.samp <- matrix(NA, nrow = numsamp, ncol = K)
     X.samp <- matrix(NA, nrow = numsamp, ncol = total_pitches)
 
-    # Current parameter values
+    # Current parameter state, overwritten each Gibbs sweep
     curnu <- init_nu
     curpi <- init_pi
     curmu <- init_mu
     X <- lapply(Tg, function(t) rep(NA, t))
 
     for (iter in 1:numsamp) {
-        #### Block 1: FFBS — sample hidden states per game ####
+        # Block 1: FFBS — draw hidden-state sequence z_{1:T} per game
+        # from p(z | y, mu, nu, pi)
         for (g in 1:G) {
             alpha <- matrix(NA, nrow = Tg[g], ncol = K)
 
-            # Forward pass
+            # Forward pass: alpha[t, k] = unnormalized p(y_{1:t}, z_t = k)
             for (i in 1:K) {
                 alpha[1, i] <- curpi[i] * dnorm(
                     Y[[g]][1],
@@ -497,6 +496,8 @@ run_gibbs_chain <- function(
             if (Tg[g] > 1) {
                 for (t in 2:Tg[g]) {
                     for (i in 1:K) {
+                        # alpha[t, i] =
+                        # N(y_t; mu_i, sigma) * sum_j alpha[t-1, j] * nu[j, i]
                         alpha[t, i] <- 0
                         for (j in 1:K) {
                             alpha[t, i] <- alpha[t, i] +
@@ -509,11 +510,14 @@ run_gibbs_chain <- function(
                 }
             }
 
-            # Backward sampling
+            # Backward sample:
+            # draw z_T from normalized alpha[T, ],
+            # then walk back drawing z_t | z_{t+1}
             prob_vec <- alpha[Tg[g], ] / sum(alpha[Tg[g], ])
             X[[g]][Tg[g]] <- sample(1:K, size = 1, prob = prob_vec)
             if (Tg[g] > 1) {
                 for (t in (Tg[g] - 1):1) {
+                    # p(z_t = i | z_{t+1}, y_{1:t}) propto alpha[t, i] * nu[i, z_{t+1}]
                     for (i in 1:K) {
                         prob_vec[i] <- alpha[t, i] * curnu[i, X[[g]][t + 1]]
                     }
@@ -523,7 +527,8 @@ run_gibbs_chain <- function(
             }
         }
 
-        #### Block 2: Sample transition matrix ####
+        # Block 2: Dirichlet update for nu
+        # tally transitions across games, then draw each row
         Nmat <- matrix(0, nrow = K, ncol = K)
         for (g in 1:G) {
             for (t in 2:Tg[g]) {
@@ -532,6 +537,7 @@ run_gibbs_chain <- function(
                 Nmat[j, k] <- Nmat[j, k] + 1
             }
         }
+        # Row j ~ Dir(prior_nu[j, ] + Nmat[j, ]) via independent Gammas, then normalized
         for (j in 1:K) {
             for (k in 1:K) {
                 curnu[j, k] <- rgamma(1, shape = Nmat[j, k] + prior_nu[j, k], rate = 1)
@@ -539,7 +545,7 @@ run_gibbs_chain <- function(
             curnu[j, ] <- curnu[j, ] / sum(curnu[j, ])
         }
 
-        #### Block 3: Sample initial distribution ####
+        # Block 3: Dirichlet update for pi from counts of first-pitch states across games
         init_count <- rep(0, K)
         for (g in 1:G) {
             init_count[X[[g]][1]] <- init_count[X[[g]][1]] + 1
@@ -549,22 +555,26 @@ run_gibbs_chain <- function(
         }
         curpi <- curpi / sum(curpi)
 
-        #### Block 4: Sample emission means ####
+        # Block 4: Normal full conditional for each emission mean mu_k,
+        # pooling pitches assigned to state k
         for (j in 1:K) {
             obs_j <- unlist(lapply(1:G, function(g) Y[[g]][X[[g]] == j]))
             n_j <- length(obs_j)
             if (n_j > 0) {
+                # Conjugate Normal-Normal update:
+                # precision-weighted average of prior mean and pooled sample mean
                 Y_bar_j <- mean(obs_j)
                 post_prec <- 1 / prior_mu_var + n_j / sigma^2
                 post_mean <- (prior_mu_mean[j] / prior_mu_var
                     + n_j * Y_bar_j / sigma^2) / post_prec
                 curmu[j] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
             } else {
+                # State went unused this sweep; fall back to a prior draw
                 curmu[j] <- rnorm(1, mean = prior_mu_mean[j], sd = sqrt(prior_mu_var))
             }
         }
 
-        #### Store samples ####
+        # Save this iteration's draws
         mu.samp[iter, ] <- curmu
         nu.samp[iter, ] <- as.vector(curnu)
         pi.samp[iter, ] <- curpi
@@ -674,8 +684,6 @@ fixed2 <- fix_label_switching(chain2$mu, chain2$nu, chain2$pi, chain2$X)
 fixed3 <- fix_label_switching(chain3$mu, chain3$nu, chain3$pi, chain3$X)
 fixed4 <- fix_label_switching(chain4$mu, chain4$nu, chain4$pi, chain4$X)
 ```
-
-\newpage
 
 ## MCMC Diagnostics
 
@@ -942,6 +950,47 @@ knitr::kable(
     posterior_table,
     digits  = 3,
     caption = "Posterior summaries from 3,600 thinned draws (4 chains × 900 samples). CI bounds are the 10th and 90th percentiles."
+)
+```
+
+```{r posterior-diagnostics-original}
+library(posterior)
+
+make_draws_df_original <- function(ch) {
+    tibble(
+        mu1 = ch$mu[, 1],
+        mu2 = ch$mu[, 2],
+        nu11 = ch$nu[, 1],
+        nu21 = ch$nu[, 2],
+        nu12 = ch$nu[, 3],
+        nu22 = ch$nu[, 4],
+        pi1 = ch$pi[, 1],
+        pi2 = ch$pi[, 2]
+    )
+}
+
+draws_list_original <- list(
+    make_draws_df_original(fixed1),
+    make_draws_df_original(fixed2),
+    make_draws_df_original(fixed3),
+    make_draws_df_original(fixed4)
+)
+
+draws_array_original <- as_draws_array(draws_list_original)
+
+diagnostics_original <- summarise_draws(
+    draws_array_original,
+    mean,
+    sd,
+    rhat,
+    ess_bulk,
+    ess_tail
+)
+
+knitr::kable(
+    diagnostics_original,
+    digits = 3,
+    caption = "Convergence diagnostics for the baseline model, computed from the full unthinned chains (4 chains x 10,000 iterations)."
 )
 ```
 
@@ -1402,7 +1451,7 @@ run_gibbs_chain_trend_var <- function(
     Tg <- sapply(Y, length)
     total_pitches <- sum(Tg)
 
-    # storage
+    # Storage for posterior draws (one row = one iteration)
     mu.samp <- matrix(NA, nrow = numsamp, ncol = K)
     beta.samp <- numeric(numsamp)
     sig2.samp <- matrix(NA, nrow = numsamp, ncol = K)
@@ -1410,7 +1459,7 @@ run_gibbs_chain_trend_var <- function(
     pi.samp <- matrix(NA, nrow = numsamp, ncol = K)
     X.samp <- matrix(NA, nrow = numsamp, ncol = total_pitches)
 
-    # Current values
+    # Current parameter state, overwritten each Gibbs sweep
     curnu <- init_nu
     curpi <- init_pi
     curmu <- init_mu
@@ -1419,11 +1468,13 @@ run_gibbs_chain_trend_var <- function(
     Xstate <- lapply(Tg, function(t) rep(NA_integer_, t))
 
     for (iter in 1:numsamp) {
-        # FFBS for hidden states
+        # Block 1: FFBS per game — emission is N(mu_k + beta*x_{g,t}, sigma_k^2);
+        # alpha is rescaled each step to avoid underflow
         for (g in 1:G) {
             alpha <- matrix(NA_real_, nrow = Tg[g], ncol = K)
 
-            # t = 1
+            # Initialize forward filter at t = 1:
+            # alpha[1, k] propto pi_k * N(y_1; mu_k + beta*x_1, sigma_k^2)
             for (k in 1:K) {
                 alpha[1, k] <- curpi[k] * dnorm(
                     Y[[g]][1],
@@ -1433,7 +1484,8 @@ run_gibbs_chain_trend_var <- function(
             }
             alpha[1, ] <- alpha[1, ] / sum(alpha[1, ])
 
-            # t >= 2
+            # Forward recursion:
+            # alpha[t, k] propto N(y_t; ...) * sum_j alpha[t-1, j] * nu[j, k]
             if (Tg[g] > 1) {
                 for (t in 2:Tg[g]) {
                     for (k in 1:K) {
@@ -1447,7 +1499,9 @@ run_gibbs_chain_trend_var <- function(
                 }
             }
 
-            # backward sample
+            # Backward sample:
+            # draw z_T from alpha[T, ],
+            # then walk back drawing z_t | z_{t+1} propto alpha[t, ] * nu[, z_{t+1}]
             Xstate[[g]][Tg[g]] <- sample(1:K, size = 1, prob = alpha[Tg[g], ])
 
             if (Tg[g] > 1) {
@@ -1459,7 +1513,8 @@ run_gibbs_chain_trend_var <- function(
             }
         }
 
-        # sample transition matrix
+        # Block 2: Dirichlet update for nu
+        # tally transitions across games, then draw each row
         Nmat <- matrix(0, nrow = K, ncol = K)
         for (g in 1:G) {
             if (Tg[g] > 1) {
@@ -1471,12 +1526,13 @@ run_gibbs_chain_trend_var <- function(
             }
         }
 
+        # Row j ~ Dir(prior_nu[j, ] + Nmat[j, ]) via independent Gammas, then normalized
         for (j in 1:K) {
             row_draw <- rgamma(K, shape = Nmat[j, ] + prior_nu[j, ], rate = 1)
             curnu[j, ] <- row_draw / sum(row_draw)
         }
 
-        # sample initial distribution
+        # Block 3: Dirichlet update for pi from counts of first-pitch states across games
         init_count <- rep(0, K)
         for (g in 1:G) {
             init_count[Xstate[[g]][1]] <- init_count[Xstate[[g]][1]] + 1
@@ -1484,28 +1540,33 @@ run_gibbs_chain_trend_var <- function(
         pi_draw <- rgamma(K, shape = init_count + prior_pi, rate = 1)
         curpi <- pi_draw / sum(pi_draw)
 
-        # Flatten data for parameter updates
+        # Flatten across games for vectorized mu / beta / sigma^2 updates
         y_all <- unlist(Y)
         x_all <- unlist(Xcov)
         z_all <- unlist(Xstate)
 
-        # sample state means mu_k
+        # Block 4: Normal full conditional for each mu_k using detrended response
+        # y - beta*x within state k
         for (k in 1:K) {
             idx <- which(z_all == k)
             n_k <- length(idx)
 
             if (n_k > 0) {
+                # Conjugate Normal-Normal update on the detrended residuals;
+                # precision = prior + n_k / sigma_k^2
                 y_star <- y_all[idx] - curbeta * x_all[idx]
                 post_prec <- 1 / prior_mu_var + n_k / cursig2[k]
                 post_mean <- (prior_mu_mean[k] / prior_mu_var +
                     sum(y_star) / cursig2[k]) / post_prec
                 curmu[k] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
             } else {
+                # State went unused this sweep; fall back to a prior draw
                 curmu[k] <- rnorm(1, mean = prior_mu_mean[k], sd = sqrt(prior_mu_var))
             }
         }
 
-        # Sample linear trend beta
+        # Block 5: Normal full conditional for shared trend beta —
+        # weighted regression of (y - mu_z) on x with state-specific variances
         mu_by_obs <- curmu[z_all]
         sig2_by_obs <- cursig2[z_all]
         y_tilde <- y_all - mu_by_obs
@@ -1516,16 +1577,19 @@ run_gibbs_chain_trend_var <- function(
 
         curbeta <- rnorm(1, mean = post_mean_beta, sd = sqrt(1 / post_prec_beta))
 
-        # sample state-specific variances sigma_k^2
+        # Block 6: Inverse-Gamma full conditional for sigma_k^2 from
+        # within-state residuals (y - mu_k - beta*x)
         for (k in 1:K) {
             idx <- which(z_all == k)
             n_k <- length(idx)
 
             if (n_k > 0) {
+                # Conjugate IG update: shape += n_k / 2, rate += SS_k / 2
                 resid_k <- y_all[idx] - curmu[k] - curbeta * x_all[idx]
                 post_a <- prior_sig2_a + n_k / 2
                 post_b <- prior_sig2_b + sum(resid_k^2) / 2
             } else {
+                # State went unused this sweep; draw from the prior
                 post_a <- prior_sig2_a
                 post_b <- prior_sig2_b
             }
@@ -1533,7 +1597,7 @@ run_gibbs_chain_trend_var <- function(
             cursig2[k] <- 1 / rgamma(1, shape = post_a, rate = post_b)
         }
 
-        # store draws
+        # Save this iteration's draws
         mu.samp[iter, ] <- curmu
         beta.samp[iter] <- curbeta
         sig2.samp[iter, ] <- cursig2
