@@ -219,6 +219,26 @@ tibble(
 prior_mu_mean <- c(96, 99)
 ```
 
+```{r prior-viz}
+ggplot(historic_cole, aes(x = release_speed)) +
+    geom_density(fill = "grey85", color = "grey40", linewidth = 0.6) +
+    geom_vline(xintercept = empirical_mu[1], linetype = "dashed", color = "grey40", linewidth = 0.7) +
+    geom_vline(xintercept = empirical_mu[2], linetype = "dashed", color = "#4A90D9", linewidth = 0.7) +
+    annotate("text",
+        x = empirical_mu[1] - 0.15, y = Inf, label = paste0("Baseline\n", round(empirical_mu[1], 1), " mph"),
+        hjust = 1, vjust = 1.3, size = 3.2, color = "grey40"
+    ) +
+    annotate("text",
+        x = empirical_mu[2] + 0.15, y = Inf, label = paste0("Hot\n", round(empirical_mu[2], 1), " mph"),
+        hjust = 0, vjust = 1.3, size = 3.2, color = "#4A90D9"
+    ) +
+    labs(
+        title = "Historical FF Velocity Distribution (2019–2023)",
+        x = "Velocity (mph)", y = "Density"
+    ) +
+    theme_bw()
+```
+
 The three sets of model parameters each receive their own prior.
 
 For the **emission means** ($\mu_k$), we use Normal priors centered on the empirical group means above, with a standard deviation of 2 mph. This is wide enough that the posterior is driven by the 2024 data, but anchored close enough to realistic velocity values that the sampler does not waste time exploring implausible regions.
@@ -722,10 +742,10 @@ pi_pool <- do.call(rbind, lapply(thinned_chains, `[[`, "pi"))
 summarise_param <- function(draws, name) {
     tibble(
         Parameter = name,
-        Mean      = mean(draws),
-        SD        = sd(draws),
-        `10%`     = quantile(draws, 0.10),
-        `90%`     = quantile(draws, 0.90)
+        Mean = mean(draws),
+        SD = sd(draws),
+        `10%` = quantile(draws, 0.10),
+        `90%` = quantile(draws, 0.90)
     )
 }
 
