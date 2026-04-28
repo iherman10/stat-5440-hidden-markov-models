@@ -19,9 +19,72 @@ knitr::opts_chunk$set(
 
 ## What Problem Does This Method Solve?
 
+Think about the last time you tried to figure out if a friend was in a bad mood. You couldn't see inside their head, but you could observe their behavior - maybe they snapped at a question, skipped lunch, or sighed loudly several times. From those observations, you made an inference: they're probably in a bad mood. That intuition - inferring something hidden from things you $can$ observe - is exactly what a Hidden Markov Model (HMM) does, just in a much more mathematical way.
+
+To understand an HMM, it helps to first understand what a standard Markov model does. A Markov model is a probabilistic model describing a sequence of events with discrete states, where the probability of moving to the next state depends only on the current state - not on anything that came before it. As a simple example, suppose a friend named Bob does one of two activities each day: he either goes on a run or watches a movie, and tomorrow's activity depends only on today's activity. Each state has associate transition probabilities governing how likely he is to switch, If Bob ran today, there might be a 40% chance he runs tomorrow and a 60% chance he watches a movie. If he watched a movie today, there might be a 30% chance he watches again tomorrow and a 70% chance he runs.
+
+```{r bob-markov, fig.align='center', fig.width=7, fig.height=4, message=FALSE, warning=FALSE, echo=FALSE}
+library(ggplot2)
+
+# Data for the 2x2 grid
+grid_data <- data.frame(
+  from  = c("Run", "Run", "Movie", "Movie"),
+  to    = c("Run", "Movie", "Run", "Movie"),
+  prob  = c(0.40, 0.60, 0.70, 0.30),
+  label = c("40%", "60%", "70%", "30%")
+)
+
+# Set factor order so "Run" appears first (top/left)
+grid_data$from <- factor(grid_data$from, levels = c("Run", "Movie"))
+grid_data$to   <- factor(grid_data$to,   levels = c("Run", "Movie"))
+
+ggplot(grid_data, aes(x = to, y = from)) +
+  geom_tile(fill = "steelblue", alpha = 0.15, color = "steelblue", linewidth = 0.8) +
+  geom_text(aes(label = label), size = 8, fontface = "bold", color = "steelblue") +
+  scale_x_discrete(position = "top") +
+  labs(
+    title   = "Bob's Transition Probabilities",
+    x       = "Tomorrow's Activity",
+    y       = "Today's Activity"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title       = element_text(hjust = 0.5, size = 13, face = "bold", margin = margin(b = 10)),
+    axis.title.x     = element_text(size = 11, face = "bold", margin = margin(b = 8)),
+    axis.title.y     = element_text(size = 11, face = "bold", margin = margin(r = 8)),
+    axis.text        = element_text(size = 11),
+    panel.grid       = element_blank(),
+    aspect.ratio     = 1
+  )
+```
+
+A Hidden Markov Model extends this by introducing an underlying state that drives the observations - but that state is never directly observed. In Bob's case, suppose his daily activity is actually determined by the weather, which can either be rainy or sunny. The weather evolves as a Markov process, but since Bob lives far away, we never observe the weather directly. We only see what activity he does. That unobserved weather state, which generates the observable activity outcomes, is the core of an HMM.
+
+Every HMM has three components:
+
+1. **Hidden states** - a discrete set of underlying conditions that evolve over time according to a Markov process. In the Bob example, these are the two weather states, rainy and sunny.
+
+2. **Transition matrix** - the probabilities of moving from one hidden state to another. For instance, if it's raining today, there might be a 60% chance of rain tomorrow and a 40% chance of sun. These transition probabilities define how the hidden process evolves.
+
+3. **Emission probabilities** - given the current hidden state, the probability of each observable outcome. In our example, if it's sunny there's a 60% chance Bob runs and a 40% chance he watches a movie; if it's raining, those probabilities reverse to 30% and 70%. The observations we see are $emitted$ from the hidden state.
+
+The key point is that we never observe the hidden states directly - we only ever see the emissions. The goal of the HMM is to work backwards: given the sequence of observations, what can we infer about the hidden states that generated them?
+
+To make an HMM Bayesian, we place priors on the transition probabilities and emission probabilities, which are the parameters for the model. This allows us to incorporate domain knowledge or prior expectations into the model, and to quantify uncertainty. The Bayesian posterior we get also gives us full distributions over both model parameters and the hidden state sequences, rather than just point estimates.
+
 ## Why Can't Standard Regression Handle It?
 
+There are three fundamental reasons why standard regression is not suited for HMM problems. First, the cause is invisible. Regression requires you to explicitly specify the variables driving the variation in your outcome. In an HMM setting, that driver is the hidden state - which, by definition, we do not observe. There is no covariate to include in a regression model, because the thing generating the outcomes is unobserved.
+
+Second, the independence assumption is violated. Linear regression assumes that observations are independent (given the covariates). However is sequential HMM data, we essentially assume the opposite to be true. Each observation is dependent on the hidden state, and each hidden state is dependent on the previous hidden state. The encodes severe autocorrelation into our data. HMMs are explicitly designed to handle this temporal dependence, but linear regression is not.
+
+Third, the data-generating process itself changes. Regression produces a single, fixed relationship between predictors and outcomes. In an HMM setting, that relationship shifts depending on which hidden state we are in. This is modeled in an HMM through different emission probability distributions for each hidden state. However, in linear regression, we would be forced to model this using two multiple regressions, one for each hidden state. However, we cannot do this because we don't know which observations belong to which state. HMMs solve this by estimating the hidden states and the model parameters simultaneuously.
+
 ## Where Does It Show Up in Practice?
+
+Hidden Markov Models have a long history of real-world application across many fields. The original and most widely-known use is speech recognition, where the hidden states correspond to phonemes - the fundamental units of sound in a word - and the observations are raw acoustic signals. Before the era of deep learning and transformer models, HMMs were the backbone of speech recognition systems for decades.
+
+In genomics, HMMs have been used to infer whether sequences of DNA correspond to coding or non-coding regions, based on pattersn in the nucleotide sequence. In finance, they are used to identify market regimes - bull markets, bear markets, high volatility periods - from observed price or return sequences. And in sports analytics, HMMs have been applied to model latent performance states, such as whether a basketball player is "hot" or "cold" during a game based on a sequence of their shot outcomes. This last application, sports analytics, is what we explore in the rest of this tutorial.
 
 ---
 
