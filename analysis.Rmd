@@ -453,13 +453,18 @@ We also apply a **label-switching correction** after each iteration. Because the
 
 To assess convergence and reduce dependence on starting values, we run **four independent chains** from different initializations and discard the first half of each chain as burn-in. We reshape the pitch-level data into $Y$, a list of length $G$ where $Y_g$ is the ordered vector of four-seam fastball velocities for game $g$. We also fix $\sigma$ to the empirical standard deviation of all 2024 velocities, a shared, known variance assumed by the model.
 
-```{r}
+\newpage
+
+```{r, echo=TRUE}
 # Reshape cleaned data into list-of-games format expected by the HMM
 Y <- split(filtered_gerrit_cole$release_speed, filtered_gerrit_cole$game_number)
 Y <- lapply(Y, unname)
 sigma <- sd(unlist(Y))
 
-run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_mu_var, init_nu, init_pi, init_mu, numsamp) {
+run_gibbs_chain <- function(
+  Y, sigma, prior_nu, prior_pi, prior_mu_mean,
+  prior_mu_var, init_nu, init_pi, init_mu, numsamp
+) {
     K <- length(init_mu)
     G <- length(Y)
     Tg <- sapply(Y, length)
@@ -484,7 +489,10 @@ run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_m
 
             # Forward pass
             for (i in 1:K) {
-                alpha[1, i] <- curpi[i] * dnorm(Y[[g]][1], curmu[i], sigma)
+                alpha[1, i] <- curpi[i] * dnorm(
+                    Y[[g]][1],
+                    curmu[i], sigma
+                )
             }
             if (Tg[g] > 1) {
                 for (t in 2:Tg[g]) {
@@ -492,7 +500,10 @@ run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_m
                         alpha[t, i] <- 0
                         for (j in 1:K) {
                             alpha[t, i] <- alpha[t, i] +
-                                alpha[t - 1, j] * curnu[j, i] * dnorm(Y[[g]][t], curmu[i], sigma)
+                                alpha[t - 1, j] * curnu[j, i] * dnorm(
+                                    Y[[g]][t],
+                                    curmu[i], sigma
+                                )
                         }
                     }
                 }
@@ -545,7 +556,8 @@ run_gibbs_chain <- function(Y, sigma, prior_nu, prior_pi, prior_mu_mean, prior_m
             if (n_j > 0) {
                 Y_bar_j <- mean(obs_j)
                 post_prec <- 1 / prior_mu_var + n_j / sigma^2
-                post_mean <- (prior_mu_mean[j] / prior_mu_var + n_j * Y_bar_j / sigma^2) / post_prec
+                post_mean <- (prior_mu_mean[j] / prior_mu_var
+                    + n_j * Y_bar_j / sigma^2) / post_prec
                 curmu[j] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
             } else {
                 curmu[j] <- rnorm(1, mean = prior_mu_mean[j], sd = sqrt(prior_mu_var))
@@ -1375,7 +1387,7 @@ Xcov <- lapply(Y, function(y) {
 })
 ```
 
-```{r}
+```{r, echo=TRUE}
 run_gibbs_chain_trend_var <- function(
   Y, Xcov,
   prior_nu, prior_pi,
@@ -1390,7 +1402,7 @@ run_gibbs_chain_trend_var <- function(
     Tg <- sapply(Y, length)
     total_pitches <- sum(Tg)
 
-    # storagE
+    # storage
     mu.samp <- matrix(NA, nrow = numsamp, ncol = K)
     beta.samp <- numeric(numsamp)
     sig2.samp <- matrix(NA, nrow = numsamp, ncol = K)
@@ -1485,7 +1497,8 @@ run_gibbs_chain_trend_var <- function(
             if (n_k > 0) {
                 y_star <- y_all[idx] - curbeta * x_all[idx]
                 post_prec <- 1 / prior_mu_var + n_k / cursig2[k]
-                post_mean <- (prior_mu_mean[k] / prior_mu_var + sum(y_star) / cursig2[k]) / post_prec
+                post_mean <- (prior_mu_mean[k] / prior_mu_var +
+                    sum(y_star) / cursig2[k]) / post_prec
                 curmu[k] <- rnorm(1, mean = post_mean, sd = sqrt(1 / post_prec))
             } else {
                 curmu[k] <- rnorm(1, mean = prior_mu_mean[k], sd = sqrt(prior_mu_var))
@@ -1498,7 +1511,8 @@ run_gibbs_chain_trend_var <- function(
         y_tilde <- y_all - mu_by_obs
 
         post_prec_beta <- 1 / prior_beta_var + sum((x_all^2) / sig2_by_obs)
-        post_mean_beta <- (prior_beta_mean / prior_beta_var + sum(x_all * y_tilde / sig2_by_obs)) / post_prec_beta
+        post_mean_beta <- (prior_beta_mean / prior_beta_var
+            + sum(x_all * y_tilde / sig2_by_obs)) / post_prec_beta
 
         curbeta <- rnorm(1, mean = post_mean_beta, sd = sqrt(1 / post_prec_beta))
 
@@ -1597,7 +1611,7 @@ For the state-specific variances \( \sigma_k^2 \), we use inverse-gamma priors \
 
 Finally, we run four chains with **dispersed initial values** for \( \mu \), \( \nu \), \( \pi \), and \( \sigma^2 \), and initialize \( \beta = 0 \). This ensures robust convergence by exploring different regions of the parameter space before settling into the posterior.
 
-```{r}
+```{r, message=FALSE}
 # Priors
 K <- 2
 prior_nu <- rbind(c(8, 1), c(1, 8))
@@ -1731,12 +1745,12 @@ fixed_chains <- list(
 
 thinned_chains <- lapply(fixed_chains, function(ch) {
     list(
-        mu   = ch$mu[thin_idx, , drop = FALSE],
+        mu = ch$mu[thin_idx, , drop = FALSE],
         beta = ch$beta[thin_idx],
         sig2 = ch$sig2[thin_idx, , drop = FALSE],
-        nu   = ch$nu[thin_idx, , drop = FALSE],
-        pi   = ch$pi[thin_idx, , drop = FALSE],
-        X    = ch$X[thin_idx, , drop = FALSE]
+        nu = ch$nu[thin_idx, , drop = FALSE],
+        pi = ch$pi[thin_idx, , drop = FALSE],
+        X = ch$X[thin_idx, , drop = FALSE]
     )
 })
 numsamp_thinned <- length(thin_idx)
@@ -2030,8 +2044,8 @@ rep_density_df <- purrr::map_dfr(overlay_draws, function(s) {
 obs_density <- density(
     y_obs,
     from = min(y_obs) - 1,
-    to   = max(y_obs) + 1,
-    n    = 512
+    to = max(y_obs) + 1,
+    n = 512
 )
 
 obs_density_df <- tibble(
